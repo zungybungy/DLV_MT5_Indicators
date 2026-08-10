@@ -1,0 +1,8 @@
+# MetaEditor build artifacts
+*.ex5
+*.ex4
+*.log
+
+# MetaEditor / MetaTrader scratch
+*.bak
+*.tmp
