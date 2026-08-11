@@ -1,4 +1,4 @@
-#property copyright "DLV"
+﻿#property copyright "DLV"
 #property link      "DLV"
 #property version   "3.6"
 
@@ -174,6 +174,23 @@ input int TextOffsetPoints = 20;
 input int RiskLineLength   = 12; 
 input string Prefix        = "TDS_";
 
+input group "Label Spacing"
+// TextOffsetPoints scales label spacing by Point(), which is quote precision,
+// not candle size — 1e-5 on 5-digit FX against 1.0 on YM. Measured against
+// median bar range it puts the countdown label 2.6-3.1x the candle away on M5
+// EURUSD/CL/YM and 0.03-0.20x on ES/NQ/XAUUSD. UseRangeOffset measures the
+// offset in LOCAL BAR RANGE instead, which is scale-free across symbol and
+// timeframe, and bar-local so a drawn label never goes stale.
+input bool UseRangeOffset      = true;
+// Base-layer fraction. The layer multipliers still apply ON TOP, so 0.10 here
+// is setup 0.10x / countdown 0.25x / aggressive 0.35x / perfection 0.40x of
+// the local range. Tune against the countdown figure — it is the visible one.
+input double OffsetRangeFraction = 0.10;
+// Bars averaged into the local range. Smooths doji and single-bar spikes.
+input int OffsetRangeBars      = 14;
+// Floor in TICKS, so a near-zero range cannot collapse the label onto the bar.
+input int MinOffsetTicks       = 2;
+
 input group "Countdown Display"
 // Controls Countdown 12/13 labels and Countdown 13 alerts.
 input ENUM_COUNTDOWN_DISPLAY CountdownDisplay = COUNTDOWN_DISPLAY_BOTH;
@@ -234,6 +251,12 @@ int BuyCountCounter = 0;
 int SellCountCounter = 0;
 
 bool AlertsArmed = false;
+
+// Base label offset for the bar currently being drawn, in PRICE. Set once per
+// bar in the OnCalculate loop (see LocalOffsetUnit) and read by PutCount, which
+// has no access to the rate arrays. Falls back to the legacy fixed offset when
+// UseRangeOffset is off.
+double OffsetUnit = 0.0;
 
 struct TDCountdownEpisode
 {
@@ -785,6 +808,10 @@ int OnCalculate(const int rates_total,
    {
       bool update_objects = (i <= draw_limit);
 
+      // Only the bars that actually draw need an offset, so this costs nothing
+      // on the recalculation-only bars that make up most of the loop.
+      if(update_objects) OffsetUnit = LocalOffsetUnit(High, Low, i, rates_total);
+
       if(i < limit)
       {
          if(Resistance[i + 1] != EMPTY_VALUE && Close[i] > Resistance[i + 1])
@@ -1156,6 +1183,33 @@ int OnCalculate(const int rates_total,
    return(rates_total);
 }
 
+// Base label offset in PRICE for bar `i`, as a fraction of the mean bar range
+// over the OffsetRangeBars bars ENDING AT i. Series-indexed, so those are bars
+// i .. i+n-1 — all at or before i, never ahead of it.
+double LocalOffsetUnit(const double &High[], const double &Low[],
+                       const int i, const int rates_total)
+{
+   if(!UseRangeOffset)
+      return TextOffsetPoints * Point();
+
+   double tick = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tick <= 0.0) tick = Point();
+   double floor_offset = MathMax(MinOffsetTicks, 0) * tick;
+
+   int n = MathMax(OffsetRangeBars, 1);
+   n = MathMin(n, rates_total - i);
+   double total = 0.0;
+   int counted = 0;
+   for(int k = i; k < i + n; k++)
+   {
+      double range = High[k] - Low[k];
+      if(range > 0.0) { total += range; counted++; }
+   }
+
+   double unit = (counted > 0) ? (total / counted) * OffsetRangeFraction : 0.0;
+   return MathMax(unit, floor_offset);
+}
+
 void PutCount(const ENUM_COUNT_TYPE count_type, const string s, const datetime time, const double price)
 {
    string numeric_label = s;
@@ -1183,7 +1237,15 @@ void PutCount(const ENUM_COUNT_TYPE count_type, const string s, const datetime t
    ENUM_OBJECT object_type = OBJ_TEXT;
    long anchor_val = ANCHOR_CENTER; 
    double final_price = price;
-   double point = Point();
+   // OffsetUnit already carries either the local-range unit or the legacy
+   // TextOffsetPoints * Point() offset, so the layers below keep their RELATIVE
+   // spacing (1.0 / 2.5 / 3.5 / 4.0) and only the unit they measure has moved.
+   double offset_unit = OffsetUnit;
+   // Every caller sits inside an `update_objects` guard, which is also where
+   // OffsetUnit is set, so this cannot currently fire. It is here so that a
+   // future call site added outside that guard degrades to the legacy offset
+   // instead of silently stacking every label exactly on the bar's extreme.
+   if(offset_unit <= 0.0) offset_unit = TextOffsetPoints * Point();
    double layer_mult = 1.0; 
    
    switch(count_type)
@@ -1193,7 +1255,7 @@ void PutCount(const ENUM_COUNT_TYPE count_type, const string s, const datetime t
          colour = BuySetupColor;
          anchor_val = ANCHOR_UPPER; 
          layer_mult = 1.0; 
-         final_price = price - (TextOffsetPoints * layer_mult * point);
+         final_price = price - (layer_mult * offset_unit);
          break;
          
       case COUNT_TYPE_SELL_SETUP:
@@ -1201,7 +1263,7 @@ void PutCount(const ENUM_COUNT_TYPE count_type, const string s, const datetime t
          colour = SellSetupColor;
          anchor_val = ANCHOR_LOWER; 
          layer_mult = 1.0;
-         final_price = price + (TextOffsetPoints * layer_mult * point);
+         final_price = price + (layer_mult * offset_unit);
          break;
          
       case COUNT_TYPE_BUY_COUNTDOWN:
@@ -1209,7 +1271,7 @@ void PutCount(const ENUM_COUNT_TYPE count_type, const string s, const datetime t
          colour = CountdownColor;
          anchor_val = ANCHOR_UPPER;
          layer_mult = 2.5; 
-         final_price = price - (TextOffsetPoints * layer_mult * point);
+         final_price = price - (layer_mult * offset_unit);
          break;
          
       case COUNT_TYPE_SELL_COUNTDOWN:
@@ -1217,7 +1279,7 @@ void PutCount(const ENUM_COUNT_TYPE count_type, const string s, const datetime t
          colour = CountdownColor;
          anchor_val = ANCHOR_LOWER;
          layer_mult = 2.5; 
-         final_price = price + (TextOffsetPoints * layer_mult * point);
+         final_price = price + (layer_mult * offset_unit);
          break;
 
       case COUNT_TYPE_BUY_AGGRESSIVE:
@@ -1225,7 +1287,7 @@ void PutCount(const ENUM_COUNT_TYPE count_type, const string s, const datetime t
          colour = AggressiveCountdownColor;
          anchor_val = ANCHOR_UPPER;
          layer_mult = 3.5;
-         final_price = price - (TextOffsetPoints * layer_mult * point);
+         final_price = price - (layer_mult * offset_unit);
          break;
 
       case COUNT_TYPE_SELL_AGGRESSIVE:
@@ -1233,7 +1295,7 @@ void PutCount(const ENUM_COUNT_TYPE count_type, const string s, const datetime t
          colour = AggressiveCountdownColor;
          anchor_val = ANCHOR_LOWER;
          layer_mult = 3.5;
-         final_price = price + (TextOffsetPoints * layer_mult * point);
+         final_price = price + (layer_mult * offset_unit);
          break;
          
       case COUNT_TYPE_BUY_PERFECTION:
@@ -1242,7 +1304,7 @@ void PutCount(const ENUM_COUNT_TYPE count_type, const string s, const datetime t
          object_type = OBJ_ARROW;
          anchor_val = ANCHOR_TOP; 
          layer_mult = 4.0; 
-         final_price = price - (TextOffsetPoints * layer_mult * point); 
+         final_price = price - (layer_mult * offset_unit); 
          break;
          
       case COUNT_TYPE_SELL_PERFECTION:
@@ -1251,7 +1313,7 @@ void PutCount(const ENUM_COUNT_TYPE count_type, const string s, const datetime t
          object_type = OBJ_ARROW;
          anchor_val = ANCHOR_BOTTOM; 
          layer_mult = 4.0; 
-         final_price = price + (TextOffsetPoints * layer_mult * point); 
+         final_price = price + (layer_mult * offset_unit); 
          break;
    }
    
@@ -1279,7 +1341,12 @@ void PutCount(const ENUM_COUNT_TYPE count_type, const string s, const datetime t
    }
    else
    {
-      if(MathAbs(ObjectGetDouble(0, name, OBJPROP_PRICE) - final_price) > point)
+      // Reposition tolerance is a genuine price epsilon, NOT the offset unit —
+      // under UseRangeOffset the unit is a large multiple of a tick, and using
+      // it here would swallow every real move of an existing label.
+      double reprice_eps = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+      if(reprice_eps <= 0.0) reprice_eps = Point();
+      if(MathAbs(ObjectGetDouble(0, name, OBJPROP_PRICE) - final_price) > reprice_eps)
          ObjectSetDouble(0, name, OBJPROP_PRICE, final_price);
 
       ObjectSetInteger(0, name, OBJPROP_COLOR, colour);
