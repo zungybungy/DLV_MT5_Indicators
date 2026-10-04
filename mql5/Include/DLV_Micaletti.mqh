@@ -97,6 +97,8 @@ void MicalEWM(const double &x[],double &y[],const int n,const double alpha,const
       double prev=(i>0)?y[i-1]:EMPTY_VALUE;
       if(!MicalValid(prev)) { y[i]=x[i]; continue; }
       if(!MicalValid(x[i])) { y[i]=prev; continue; }
+      // pandas preserves exact ties instead of rounding a constant average.
+      if(prev==x[i]) { y[i]=prev; continue; }
       int gaps=0;
       for(int j=i-1;j>=0 && !MicalValid(x[j]);j--) gaps++;
       double weight=MathPow(1-alpha,gaps+1);

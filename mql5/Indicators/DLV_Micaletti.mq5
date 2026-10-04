@@ -16,7 +16,7 @@
 // Exit: accepted threshold entry + preset h bars; repeated entries do not
 // extend the deadline. Same-side exit wins on the deadline bar.
 // Risk: signal indicator only; no orders, sizing, SL/TP, fees or slippage.
-// EA: read shift 1 once per new bar. Buffer masks model the Lab's separate
+// EA: retry shift 1 until all masks differ from EMPTY_VALUE. Masks model separate
 // long/short legs. An EA must track its actual fills and resolve opposite legs.
 // All chart timeframes work in proxy / chart VWAP mode; daily M1 VWAP requires D1.
 #include <DLV_Micaletti.mqh>
@@ -26,7 +26,7 @@ input ENUM_MICAL_DIRECTION InpDirection=MICAL_LONG;
 input ENUM_APPLIED_VOLUME InpVolume=VOLUME_TICK;
 input ENUM_MICAL_VWAP InpVWAPMode=MICAL_LAB_PROXY;
 input string InpVWAPName="VWAP";
-input bool InpLogSignals=false;
+input bool InpLogSignals=true;
 
 double RankBuffer[],RawBuffer[],LongEntry[],LongExit[],ShortEntry[],ShortExit[];
 double VWAPBuffer[],LongDue[],ShortDue[];
@@ -37,6 +37,26 @@ datetime LastLogged=0;
 datetime LastDependencyWarning=0;
 datetime LastM1Check=0;
 int LastM1Bars=-1;
+datetime LastM1Sweep=0,LastM1First=0,LastM1Latest=0;
+double SessionCache[];
+datetime SessionTimes[];
+
+void MicalDependencyWarning(const string message)
+{
+   if(TimeLocal()-LastDependencyWarning<30) return;
+   PrintFormat("DLV_Micaletti: %s (error %d)",message,GetLastError());
+   LastDependencyWarning=TimeLocal();
+}
+
+void MicalUnset(const int start,const int end)
+{
+   for(int i=start;i<end;i++)
+   {
+      RankBuffer[i]=RawBuffer[i]=VWAPBuffer[i]=EMPTY_VALUE;
+      LongEntry[i]=LongExit[i]=ShortEntry[i]=ShortExit[i]=EMPTY_VALUE;
+      LongDue[i]=ShortDue[i]=-1;
+   }
+}
 
 int OnInit()
 {
@@ -85,24 +105,56 @@ void OnDeinit(const int reason) { if(VWAPHandle!=INVALID_HANDLE) IndicatorReleas
 // volume, rather than requiring a midnight bar or guessing its closing minute.
 bool MicalLoadDailyVWAP(const datetime &time[],const double &open[],const double &high[],
                         const double &low[],const double &close[],const long &tick_volume[],
-                        const long &volume[],const int n,double &daily[])
+                        const long &volume[],const int n,const bool reset,double &daily[],int &changed)
 {
+   changed=n;
+   int cached=ArraySize(SessionCache);
    ArrayResize(daily,n);
-   // Stream one day at a time: long histories must not allocate millions of
-   // temporary MqlRates/VWAP values on a chart tick.
+   ArrayInitialize(daily,EMPTY_VALUE);
+   // prev_calculated==0 also follows a pending dependency. Preserve validated
+   // sessions and their recursion origin; remap actual chart changes by time.
+   bool same_layout=(cached<=n && ArraySize(SessionTimes)==cached);
+   if(same_layout) for(int i=0;i<cached;i++) if(SessionTimes[i]!=time[i]) { same_layout=false; break; }
+   if(same_layout && cached>0) ArrayCopy(daily,SessionCache,0,0,cached);
+   else
+   {
+      changed=0;
+      int cursor=0;
+      for(int i=0;i<n;i++)
+      {
+         while(cursor<cached && SessionTimes[cursor]<time[i]) cursor++;
+         if(cursor<cached && SessionTimes[cursor]==time[i]) daily[i]=SessionCache[cursor];
+      }
+   }
    MqlRates minutes[];
    double values[];
-   for(int i=0;i<n;i++)
+   // Start the asynchronous series build before querying its available boundary.
+   if(CopyRates(_Symbol,PERIOD_M1,0,1,minutes)!=1 ||
+      !SeriesInfoInteger(_Symbol,PERIOD_M1,SERIES_SYNCHRONIZED)) return false;
+   int bars=Bars(_Symbol,PERIOD_M1);
+   int limit=(int)TerminalInfoInteger(TERMINAL_MAXBARS);
+   int oldest=MathMin(bars,limit)-1;
+   MqlRates boundary[];
+   // Bars can exceed MaxBars while iTime(Bars-1) is inaccessible. Copy just
+   // one bar at a capped shift; never allocate the entire M1 history.
+   if(oldest<0 || CopyRates(_Symbol,PERIOD_M1,oldest,1,boundary)!=1) return false;
+   datetime first=boundary[0].time,latest=minutes[0].time;
+   if(first<=0) return false;
+   bool sweep=reset || !same_layout || LastM1Sweep==0 || TimeLocal()-LastM1Sweep>=3600 || first<LastM1First ||
+      (bars!=LastM1Bars && latest<=LastM1Latest);
+   int from=sweep?0:MathMax(0,cached-1);
+   for(int i=from;i<n;i++)
    {
       datetime end=time[i]+86400;
+      // Retain previously validated sessions after MT5 evicts their minutes.
+      // On first load the unavailable prefix stays EMPTY_VALUE.
+      if(end<=first) continue;
       int count=CopyRates(_Symbol,PERIOD_M1,time[i],end-1,minutes);
       if(count<=0 || !SeriesInfoInteger(_Symbol,PERIOD_M1,SERIES_SYNCHRONIZED)) return false;
-      if(CopyBuffer(VWAPHandle,6,minutes[0].time,minutes[count-1].time,values)!=count) return false;
       double session_high=-DBL_MAX,session_low=DBL_MAX;
       long session_volume=0;
       for(int cursor=0;cursor<count;cursor++)
       {
-         if(minutes[cursor].time<time[i] || minutes[cursor].time+60>end) return false;
          session_high=MathMax(session_high,minutes[cursor].high);
          session_low=MathMin(session_low,minutes[cursor].low);
          session_volume+=(InpVolume==VOLUME_TICK)?minutes[cursor].tick_volume:minutes[cursor].real_volume;
@@ -110,10 +162,30 @@ bool MicalLoadDailyVWAP(const datetime &time[],const double &open[],const double
       int last=count-1;
       long expected_volume=(InpVolume==VOLUME_TICK)?tick_volume[i]:volume[i];
       if(minutes[0].open!=open[i] || session_high!=high[i] || session_low!=low[i] ||
-         minutes[last].close!=close[i] || session_volume!=expected_volume) return false;
+         minutes[last].close!=close[i] || session_volume!=expected_volume)
+      {
+         // The oldest available session can be truncated by MaxBars. Missing
+         // minutes inside the accessible history remain a pending dependency.
+         if(time[i]<=first && first<end) continue;
+         return false;
+      }
+      if(CopyBuffer(VWAPHandle,6,minutes[0].time,minutes[last].time,values)!=count) return false;
       if(!MicalValid(values[last]) || values[last]<=0) return false;
       daily[i]=values[last];
    }
+   bool usable=false;
+   for(int i=0;i<n;i++)
+   {
+      if(MicalValid(daily[i])) usable=true;
+      if(i>=cached || daily[i]!=SessionCache[i]) changed=MathMin(changed,i);
+   }
+   if(!usable) return false;
+   ArrayResize(SessionCache,n);
+   ArrayCopy(SessionCache,daily);
+   ArrayResize(SessionTimes,n);
+   ArrayCopy(SessionTimes,time,0,0,n);
+   LastM1First=first; LastM1Latest=latest; LastM1Bars=bars; LastM1Check=TimeLocal();
+   if(sweep) LastM1Sweep=TimeLocal();
    return true;
 }
 
@@ -121,12 +193,12 @@ int OnCalculate(const int rates_total,const int prev_calculated,const datetime &
                 const double &open[],const double &high[],const double &low[],const double &close[],
                 const long &tick_volume[],const long &volume[],const int &spread[])
 {
-   if(rates_total<2) return 0;
+   if(rates_total<2) { MicalUnset(0,rates_total); return 0; }
    bool m1=(VWAPHandle!=INVALID_HANDLE && InpVWAPMode==MICAL_M1_SESSION_VWAP);
    if(prev_calculated==rates_total && !m1) return rates_total;
    int minute_bars=m1?Bars(_Symbol,PERIOD_M1):0;
-   // New D1 bars/resets and M1 backfill revalidate immediately. Same-count
-   // minute corrections are revisited on the first chart tick after 60s.
+   // Ordinary minute updates validate only the most recent closed session;
+   // older backfill and the hourly sweep revalidate the accessible history.
    if(m1 && prev_calculated==rates_total && minute_bars==LastM1Bars &&
       TimeLocal()-LastM1Check<60 && SeriesInfoInteger(_Symbol,PERIOD_M1,SERIES_SYNCHRONIZED)) return rates_total;
    ArraySetAsSeries(time,false); ArraySetAsSeries(open,false); ArraySetAsSeries(high,false); ArraySetAsSeries(low,false);
@@ -139,35 +211,20 @@ int OnCalculate(const int rates_total,const int prev_calculated,const datetime &
    double sessions[];
    if(m1)
    {
-      // Revalidate even without a new D1 bar: M1 backfill/corrections can change
-      // a previously accepted input. A failed dependency invalidates all masks.
-      if(!MicalLoadDailyVWAP(time,open,high,low,close,tick_volume,volume,n,sessions))
+      int changed=n;
+      if(!MicalLoadDailyVWAP(time,open,high,low,close,tick_volume,volume,n,
+                             prev_calculated==0,sessions,changed))
       {
-         if(TimeLocal()-LastDependencyWarning>=30)
-         {
-            Print("DLV_Micaletti: M1 history/VWAP pending or minute session OHLC/volume differs from D1.");
-            LastDependencyWarning=TimeLocal();
-         }
-         for(int i=0;i<rates_total;i++)
-         {
-            RankBuffer[i]=RawBuffer[i]=VWAPBuffer[i]=EMPTY_VALUE;
-            LongEntry[i]=LongExit[i]=ShortEntry[i]=ShortExit[i]=0;
-            LongDue[i]=ShortDue[i]=-1;
-         }
+         MicalDependencyWarning("M1 history/VWAP pending or minute session OHLC/volume differs from D1");
+         MicalUnset(0,rates_total);
          return 0;
       }
-      LastM1Check=TimeLocal(); LastM1Bars=minute_bars;
-      for(int i=0;i<MathMin(n,ArraySize(CalcVWAP));i++) if(sessions[i]!=CalcVWAP[i]) { start=0; break; }
-      if(prev_calculated==rates_total && start!=0) return rates_total;
+      start=MathMin(start,changed);
+      if(prev_calculated==rates_total && start>=n) return rates_total;
    }
    // A pending/missing dependency must expose empty values, not MT5's default
    // zero-filled buffers (which could otherwise look like an oversold rank).
-   for(int i=start;i<rates_total;i++)
-   {
-      RankBuffer[i]=RawBuffer[i]=VWAPBuffer[i]=EMPTY_VALUE;
-      LongEntry[i]=LongExit[i]=ShortEntry[i]=ShortExit[i]=0;
-      LongDue[i]=ShortDue[i]=-1;
-   }
+   MicalUnset(start,rates_total);
    ArrayResize(CalcVolume,n); ArrayResize(CalcVWAP,n); ArrayResize(CalcRank,n);
    for(int i=start;i<n;i++)
    {
@@ -179,9 +236,13 @@ int OnCalculate(const int rates_total,const int prev_calculated,const datetime &
       double ready[];
       // Request the dependent buffer before mapping timestamps. In a newly
       // opened terminal the M1 series can still be building asynchronously.
-      if(CopyBuffer(VWAPHandle,6,0,1,ready)!=1) return prev_calculated;
+      if(CopyBuffer(VWAPHandle,6,0,1,ready)!=1)
+      { MicalDependencyWarning("chart VWAP buffer not ready"); return prev_calculated; }
       double values[];
-      if(CopyBuffer(VWAPHandle,6,time[start],time[n-1],values)!=n-start) return prev_calculated;
+      if(CopyBuffer(VWAPHandle,6,time[start],time[n-1],values)!=n-start)
+      { MicalDependencyWarning("closed-bar chart VWAP copy failed"); return prev_calculated; }
+      for(int i=0;i<ArraySize(values);i++) if(!MicalValid(values[i]) || values[i]<=0)
+      { MicalDependencyWarning("closed-bar chart VWAP value not ready"); return prev_calculated; }
       for(int i=start;i<n;i++) CalcVWAP[i]=values[i-start];
    }
    Core.Calculate(InpPreset,high,low,close,CalcVolume,CalcVWAP,n,start,CalcRaw);
@@ -192,15 +253,20 @@ int OnCalculate(const int rates_total,const int prev_calculated,const datetime &
       RawBuffer[i]=CalcRaw[i]; RankBuffer[i]=CalcRank[i]; VWAPBuffer[i]=CalcVWAP[i];
       LongEntry[i]=LE[i]; LongExit[i]=LX[i]; ShortEntry[i]=SE[i]; ShortExit[i]=SX[i];
       LongDue[i]=LD[i]; ShortDue[i]=SD[i];
+      if(m1 && !MicalValid(CalcVWAP[i])) MicalUnset(i,i+1);
    }
-   RankBuffer[n]=RawBuffer[n]=VWAPBuffer[n]=EMPTY_VALUE;
-   LongEntry[n]=LongExit[n]=ShortEntry[n]=ShortExit[n]=0;
-   LongDue[n]=ShortDue[n]=-1;
-   if(InpLogSignals && time[n-1]!=LastLogged && prev_calculated>0)
+   MicalUnset(n,n+1);
+   if(InpLogSignals)
    {
-      if(LE[n-1]+LX[n-1]+SE[n-1]+SX[n-1]>0)
-         PrintFormat("%s %s %s: rank=%.8f LE=%.0f LX=%.0f SE=%.0f SX=%.0f",MicalName(InpPreset),_Symbol,TimeToString(time[n-1]),CalcRank[n-1],LE[n-1],LX[n-1],SE[n-1],SX[n-1]);
-      LastLogged=time[n-1];
+      // First attach logs the latest close; reconnect/reset catches up every
+      // subsequent close, without replaying the entire initial history.
+      int log_start=LastLogged==0?n-1:0;
+      for(int i=log_start;i<n;i++) if(time[i]>LastLogged && MicalValid(LongEntry[i]))
+      {
+         if(LE[i]+LX[i]+SE[i]+SX[i]>0)
+            PrintFormat("%s %s %s: rank=%.8f LE=%.0f LX=%.0f SE=%.0f SX=%.0f",MicalName(InpPreset),_Symbol,TimeToString(time[i]),CalcRank[i],LE[i],LX[i],SE[i],SX[i]);
+         LastLogged=time[i];
+      }
    }
    return rates_total;
 }

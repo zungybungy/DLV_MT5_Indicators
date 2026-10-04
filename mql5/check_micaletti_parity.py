@@ -29,25 +29,35 @@ def expected(frame: pd.DataFrame, preset_id: str, vwap_mode: int) -> pd.DataFram
         raise ValueError(f"Unknown preset {preset_id}")
     if vwap_mode not in (0, 1, 2):
         raise ValueError(f"Unknown VWAP mode {vwap_mode}")
-    operand = preset["entries"][0]["lhs"]["operand"]
-    # The rule grammar names are intentionally taken from the actual preset.
+    frame = frame.copy()
+    frame.attrs = {}
+    rank_operand = preset["entries"][0]["lhs"]
+    operand = rank_operand["operand"]
     raw = rules.operand_to_series(operand, frame)
+    unavailable = pd.Series(False, index=frame.index)
     if operand.get("name") == "MTSI" and vwap_mode != 0:
-        m, n = operand["params"]
-        if frame["vwap"].isna().any() or (frame["vwap"] <= 0).any():
-            raise ValueError("MTSI VWAP mode requires every exported VWAP to be positive")
-        r = np.log(frame["Close"] / frame["vwap"])
-        num = r.ewm(span=m, adjust=False).mean().ewm(span=n, adjust=False).mean()
-        den = r.abs().ewm(span=m, adjust=False).mean().ewm(span=n, adjust=False).mean()
-        raw = 100 * num / den.replace(0, np.nan)
-    rank = pd.Series(rules._njit_percent_rank(raw.to_numpy(dtype=float), 252), index=frame.index)
-    le, se = rank < 0.10, rank > 0.90
-    no_exit = pd.Series(False, index=frame.index)
+        unavailable = frame["vwap"].isna()
+        if ((frame["vwap"] <= 0) | np.isinf(frame["vwap"])).any():
+            raise ValueError("Available MTSI VWAP values must be finite and positive")
+        if vwap_mode == 1 and unavailable.any():
+            raise ValueError("Chart VWAP export contains pending values")
+        if vwap_mode == 2 and (unavailable.all() or (unavailable & (~unavailable).cummax()).any()):
+            raise ValueError("M1 VWAP allows only an unavailable prefix followed by complete sessions")
+        raw = rules._ps_mtsi(frame, operand["params"], vwap=frame["vwap"])
+        # Supply the production formula's result to the same operand evaluator
+        # used by the Lab's complete preset rules, including future rule changes.
+        frame.attrs["_operand_cache"].entries[rules._op_cache_key(operand)] = raw
+    rank = rules.operand_to_series(rank_operand, frame)
+    le = rules.evaluate_rules(preset["entries"], frame)
+    se = rules.evaluate_rules(preset["short_entries"], frame)
     hold = preset["params"]["hold_bars"]
-    lx = time_stops.apply_bar_stop(le, no_exit, hold)
-    sx = time_stops.apply_bar_stop(se, no_exit, hold)
-    return pd.DataFrame({"raw": raw, "rank": rank, "long_entry": le, "long_exit": lx,
-                         "short_entry": se, "short_exit": sx}, index=frame.index)
+    lx = time_stops.apply_bar_stop(le, rules.evaluate_rules(preset["exits"], frame), hold)
+    sx = time_stops.apply_bar_stop(se, rules.evaluate_rules(preset["short_exits"], frame), hold)
+    target = pd.DataFrame({"raw": raw, "rank": rank, "long_entry": le, "long_exit": lx,
+                           "short_entry": se, "short_exit": sx}, index=frame.index)
+    for column in ("long_entry", "long_exit", "short_entry", "short_exit"):
+        target[column] = target[column].astype(float).mask(unavailable)
+    return target
 
 
 def check(path: Path, report_natives: bool = False) -> tuple[str, int]:
@@ -78,11 +88,16 @@ def check(path: Path, report_natives: bool = False) -> tuple[str, int]:
                                  f"bar {i} ({frame.index[i]}): MQL5={actual[i]!r}, Lab={want[i]!r}")
     if report_natives and "native_raw" in frame and frame["native_raw"].notna().any():
         native = frame["native_raw"].to_numpy(dtype=float)
-        native_rank = rules._njit_percent_rank(native, 252)
+        preset = presets.get_preset(pid)
+        operand = preset["entries"][0]["lhs"]["operand"]
+        native_frame = frame.copy()
+        native_frame.attrs = {}
+        rules.operand_to_series(operand, native_frame)
+        native_frame.attrs["_operand_cache"].entries[rules._op_cache_key(operand)] = pd.Series(native, index=frame.index)
         valid = np.isfinite(native) & np.isfinite(target["raw"].to_numpy())
         max_delta = np.max(np.abs(native[valid] - target["raw"].to_numpy()[valid]))
-        long_diff = np.count_nonzero((native_rank < .10) != target["long_entry"].to_numpy())
-        short_diff = np.count_nonzero((native_rank > .90) != target["short_entry"].to_numpy())
+        long_diff = np.count_nonzero(rules.evaluate_rules(preset["entries"], native_frame).to_numpy() != target["long_entry"].to_numpy())
+        short_diff = np.count_nonzero(rules.evaluate_rules(preset["short_entries"], native_frame).to_numpy() != target["short_entry"].to_numpy())
         print(f"NATIVE {pid}: max raw delta={max_delta:.9g}; threshold differences long={long_diff}, short={short_diff}")
     return pid, len(frame)
 

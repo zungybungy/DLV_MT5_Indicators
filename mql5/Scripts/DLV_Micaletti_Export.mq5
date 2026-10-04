@@ -55,7 +55,8 @@ void OnStart()
          && CopyBuffer(handle,6,0,count,vwap)==count;
       IndicatorRelease(handle);
       if(ok && (MicalValid(rank[count-1]) || MicalValid(raw[count-1]) ||
-         le[count-1]!=0 || lx[count-1]!=0 || se[count-1]!=0 || sx[count-1]!=0))
+         le[count-1]!=EMPTY_VALUE || lx[count-1]!=EMPTY_VALUE ||
+         se[count-1]!=EMPTY_VALUE || sx[count-1]!=EMPTY_VALUE))
       { Print("Micaletti export: forming bar exposed a value/signal; refusing export."); return; }
       // Abort rather than compare a truncated or moving calculation window.
       if(!ok || Bars(_Symbol,_Period)!=count || iTime(_Symbol,_Period,count-1)!=origin || iTime(_Symbol,_Period,0)!=tail)
@@ -79,7 +80,7 @@ void OnStart()
          FileWrite(file,MicalName(p),(int)InpVWAPMode,(long)rates[i].time,
             Cell(rates[i].open),Cell(rates[i].high),Cell(rates[i].low),Cell(rates[i].close),
             InpVolume==VOLUME_TICK?rates[i].tick_volume:rates[i].real_volume,Cell(vwap[i]),
-            Cell(raw[i]),Cell(rank[i]),(int)le[i],(int)lx[i],(int)se[i],(int)sx[i],Cell(native[i]));
+            Cell(raw[i]),Cell(rank[i]),Cell(le[i]),Cell(lx[i]),Cell(se[i]),Cell(sx[i]),Cell(native[i]));
       FileClose(file);
       Print("Micaletti export: ",name);
    }

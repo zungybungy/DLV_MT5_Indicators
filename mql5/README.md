@@ -21,24 +21,36 @@ only for the two explicit VWAP modes. It remains a separate dependency.
 | --- | --- |
 | 0 | Rolling percent rank, plotted on [0,1] |
 | 1 | Raw oscillator, including DVO/DVI's internal rank |
-| 2 / 3 | Long entry / hold exit masks, 0 or 1 |
-| 4 / 5 | Short entry / hold exit masks, 0 or 1 |
+| 2 / 3 | Long entry / hold exit masks: 0 or 1 when computed; `EMPTY_VALUE` while pending |
+| 4 / 5 | Short entry / hold exit masks: 0 or 1 when computed; `EMPTY_VALUE` while pending |
 | 6 | VWAP input used by MTSI; typical price otherwise |
 
-All buffers use normal MT5 `CopyBuffer` shifts: **read shift 1 once on each new
-bar**. The forming bar has empty raw/rank/VWAP and zero signal masks. Historical
+All buffers use normal MT5 `CopyBuffer` shifts. **Retry shift 1 on subsequent
+ticks until every mask you use differs from `EMPTY_VALUE`.** Mark that closed
+bar as processed only after the read succeeds; process each timestamp once.
+The forming bar has empty raw/rank/VWAP and empty signal masks. Historical
 buffers retain the Lab's unshifted close-based signal timestamps. In a live EA,
 the prior close's signal can only be executed after that close has occurred.
-`InpLogSignals=true` logs new closed-bar masks to the terminal journal.
+`InpLogSignals=true` (the default) logs closed-bar signals to the journal.
+Initial attachment logs the latest close; subsequent calculations also log
+closes missed during a disconnect or history reset. Dependency warnings are
+logged at most once every 30 seconds.
 
 ```cpp
 int h = iCustom(_Symbol, _Period, "DLV_Micaletti",
                 MICAL_MTSI_H1, MICAL_LONG, VOLUME_TICK, MICAL_LAB_PROXY,
-                "VWAP", false);
-double entry[], exit[];
-// Check h != INVALID_HANDLE and check both returned counts before use.
-CopyBuffer(h, 2, 1, 1, entry);
-CopyBuffer(h, 3, 1, 1, exit);
+                "VWAP", true);
+bool ReadClosedMasks(const int handle, double &entry, double &exit)
+{
+   double e[], x[];
+   if(CopyBuffer(handle, 2, 1, 1, e)!=1 || CopyBuffer(handle, 3, 1, 1, x)!=1)
+      return false;
+   if(e[0]==EMPTY_VALUE || x[0]==EMPTY_VALUE) return false;
+   entry=e[0]; exit=x[0];
+   return true;
+}
+// In OnTick: check h != INVALID_HANDLE, retry ReadClosedMasks each tick,
+// and record the shift-1 timestamp as processed only when it returns true.
 // Include <DLV_Micaletti.mqh> for the enums; release h in OnDeinit.
 ```
 
@@ -112,16 +124,31 @@ the actual VWAP is buffer 6. The compiled `input group` also occupies a position
 silently shifts the anchor/price settings. On D1 the chart-timeframe VWAP degenerates to the
 daily proxy. **Use the M1 mode for genuine daily intraday aggregation.**
 
-M1 mode requires matching M1 sessions for the entire D1 calculation window,
-not just the last 252 days. Each session's aggregated OHLC and selected-volume
-sum must match D1 exactly; a legitimate first minute after midnight is accepted.
-Missing/inconsistent history clears all signals until it recovers. The check
+M1 mode begins at the first complete available M1 session. Earlier D1 bars
+have empty VWAP/raw/rank/masks, including an incomplete oldest M1 session.
+It does not require M1 history back to the oldest D1 chart bar. Each available
+session's aggregated OHLC and selected-volume sum must match D1 exactly; a
+legitimate first minute after midnight is accepted. Missing/inconsistent history
+inside the accessible range leaves masks pending until it recovers. The check
 establishes agreement between the loaded feeds; identical aggregates cannot
-prove that a broker supplied every underlying minute. Set history limits accordingly.
-Minute buffers are streamed one session at a time. New D1 bars, history resets
-and changes in the M1 bar count trigger immediate revalidation; same-count M1
-corrections are revisited on the first chart tick after 60 seconds. The core
-recalculates when the VWAP input changes.
+prove that a broker supplied every underlying minute.
+
+Validated sessions are cached, including after their minutes leave MT5's
+available history. Dependency failures leave masks pending but preserve those
+cached sessions on retry. Cache entries follow session timestamps when the
+chart's history window changes. New D1 bars check the newly closed session and its predecessor;
+ordinary M1 updates and the 60-second check revisit only the latest closed
+session. Older backfill, history resets, and an hourly sweep revalidate all
+accessible sessions. Thus an older same-count correction can take up to an
+hour to appear. The core recalculates from the first changed VWAP input.
+
+`config/common.ini`'s `MaxBars=100000` allows approximately 69 full 24-hour
+M1 sessions, far less than daily history back to 2012. Increase the limit and
+load enough M1 data when comparing a longer reference. Boundary discovery
+respects `TERMINAL_MAXBARS` even when MT5 reports more stored bars than the limit.
+EWMs seed from the first
+available session; shorter origins can differ from a full-history run. The
+rank preserves the Lab's partial-valid-window behavior after chart bar 251.
 Its session is the existing VWAP's broker-server day, and its volume is normally
 CFD tick volume. The paper uses split/dividend-adjusted ETF minute data and daily
 equity sessions, so broker-session M1 VWAP still differs from that dataset.
@@ -175,7 +202,11 @@ this change does not modify existing Lab formulas or their attribution.
    Python input. That checks MTSI downstream of VWAP; independently verify M1
    aggregation/session coverage as well.
 
-The checker uses the actual `presets.py`, `rules.py`, and `time_stops.py`.
+The checker uses the actual `presets.py`, `rules.py`, and `time_stops.py`,
+including preset rank windows, complete entry/exit rules, and the production
+MTSI function's optional exported-VWAP input. It accepts an unavailable prefix
+only in M1 mode; interior holes, pending chart-VWAP values, and nonpositive or
+nonfinite available VWAP values fail the gate.
 It requires validity masks and every entry/exit mask to match, with 1e-8 absolute
 / 1e-9 relative tolerance for raw lines and 5e-15 for CSV-serialized ranks.
 That rank tolerance is far below one rank step; trade masks have zero tolerance.
@@ -188,11 +219,21 @@ TD indicators. Their separate TODO parity gate remains open.
 
 The automated Windows integration runner creates its own portable terminal,
 copies only binaries, symbol definitions and cached price bars, disables trading,
-and leaves its artifacts in `scratch/`. It does not copy account credentials or
+and leaves its artifacts in `scratch/`. Runner-owned copies of the scripts
+omit `FILE_COMMON`, so CSVs and result files stay in
+`scratch/<run>/MQL5/Files`. Shipped scripts retain `FILE_COMMON` for the manual
+steps above. A normal run retains 353 CSVs (352 standard exports plus one
+partial-history regression); `--history-dir` adds 22, for 375 CSVs.
+It does not copy account credentials or
 modify the user's running terminal. It tests both VWAP modes on a synthetic M1
 symbol and independently checks their aggregates, in addition to Lab parity.
 It also exercises the production calculation callback with truncated minutes,
-a late-opening session, backfill and same-count volume/VWAP corrections:
+a late-opening session, an unavailable D1 prefix, cache reuse on minute updates,
+backfill, hourly same-count volume/VWAP correction checks, pending exit retries,
+logging after reconnect/reset, constant-input EWM behavior, and expiry followed
+by a pending dependency/retry (raw, ranks, and all masks must stay identical).
+A second runner-owned portable terminal uses a real `MaxBars=5000` limit with
+6,000 stored M1 bars to test both the production callback and compiled indicator:
 
 ```powershell
 python smoke_test/_smoke_test_micaletti_mql5.py
@@ -217,6 +258,25 @@ The native comparison on that EURUSD sample found CCI decile differences of
 348 long / 337 short bars and MFI differences of 344 long / 127 short bars,
 despite very small raw-line differences. The compatibility core passed every
 rank and mask in that sample. This evidence justifies retaining its arithmetic.
+
+Validation on 5 October 2026 after the plumbing fixes: production indicator
+and both shipped scripts compiled with zero errors/warnings. The automated
+runner passed 375 CSVs / 380,913 bar evaluations with native EURUSD history,
+plus pending-exit retries, reconnect/reset logging, constant-EWM preservation,
+unavailable-prefix/oldest-partial-session recovery, minute-update cache reuse,
+older backfill, and hourly volume/VWAP correction regressions. Deliberately
+changing either Lab threshold, its rank window, or its MTSI formula made the
+gate reject captured buffers. Interior VWAP holes and pending exported masks
+were rejected. The shared `Common/Files` artifact count stayed at 1,695.
+
+Follow-up validation of the two Sol 6.1 xhigh findings: the complete 375-CSV
+suite passed again. A fresh portable terminal with `MaxBars=5000` and 6,000
+stored M1 bars passed both the production callback and compiled indicator.
+The expiry/pending/retry regression preserved every VWAP, raw value, rank,
+and signal mask exactly; shifting the chart history preserved overlapping
+cached sessions by timestamp. All production and regression scripts compiled
+without errors or warnings. A focused Sol 6.1 xhigh recheck found both issues
+resolved and no further findings in these changes.
 
 These checks do not validate execution, transaction costs, the paper's Sharpe
 ratios, or M1 session equivalence between broker CFDs and the paper's ETFs.
