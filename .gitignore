@@ -6,3 +6,8 @@
 # MetaEditor / MetaTrader scratch
 *.bak
 *.tmp
+
+# Python parity runner and retained portable-terminal artifacts
+__pycache__/
+*.py[cod]
+scratch/
