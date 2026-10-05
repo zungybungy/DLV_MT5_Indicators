@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
+from dateutil.easter import easter
 
 ROOT = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("td_smoke", ROOT / "smoke_test/_smoke_test_td_mql5.py")
@@ -84,7 +85,28 @@ def replay(terminal: Path, work: Path, symbol: str, only: tuple[str, ...], days:
     smoke.hidden_run(f'"{terminal}" /portable /config:"{config}"', timeout=4 * 3600)
 
 
-def load(path: Path) -> tuple[dict, pd.DataFrame]:
+def declared_buffers(name: str) -> int:
+    """`#property indicator_buffers` of the indicator's source: the contract the CSV's #calc must match."""
+    for line in (ROOT / f"{INDICATORS[name]}.mq5").read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("#property indicator_buffers"):
+            return int(line.split()[2])
+    raise AssertionError(f"{INDICATORS[name]}.mq5 declares no indicator_buffers")
+
+
+def check_coverage(name: str, times: list[str], days: tuple[str, str, str]) -> None:
+    """Every trading weekday of the window has a recorded bar, judged by the calendar
+    rather than by what CopyRates returned (a partial feed would shrink the window)."""
+    start, stop = pd.Timestamp(days[1]), pd.Timestamp(days[2])
+    weekdays = pd.bdate_range(start, stop - pd.Timedelta(days=1))[:-1]  # the last bar is still forming at the end
+    closed = {d for d in weekdays if (d.month, d.day) in ((12, 25), (1, 1))
+              or d.date() == easter(d.year) - pd.Timedelta(days=2)}  # Christmas, New Year, Good Friday
+    seen = set(pd.to_datetime([int(t) for t in times], unit="s").normalize())
+    if missing := [d.strftime("%Y-%m-%d") for d in weekdays if d not in seen and d not in closed]:
+        raise AssertionError(f"{name}: no recorded bar on {len(missing)} trading weekdays of {days[1]}..{days[2]} "
+                             f"(first {missing[:5]}); the replayed feed did not cover the window")
+
+
+def load(path: Path, days: tuple[str, str, str]) -> tuple[dict, pd.DataFrame]:
     lines = path.read_text(encoding="ascii").splitlines()
     if lines[-1] != "#done":
         raise AssertionError(f"{path.name} incomplete ({lines[-1]}); see the terminal's MQL5/Logs")
@@ -102,6 +124,9 @@ def load(path: Path) -> tuple[dict, pd.DataFrame]:
     for c in calc:
         if c["a"] != c["b"] or c["handle_a"] == c["handle_b"]:
             raise AssertionError(f"{path.name}: A and B not comparable {c}")
+        if int(c["buffers"]) != declared_buffers(c["indicator"]):
+            raise AssertionError(f"{path.name}: {c['indicator']} exported {c['buffers']} buffers, its source "
+                                 f"declares {declared_buffers(c['indicator'])}")
     frame = pd.read_csv(path, comment="#", dtype=str, keep_default_na=False)
     # The rows must be the complete grid: every #calc indicator x each of its
     # declared buffers x every recorded bar, exactly once. A dropped buffer or bar
@@ -109,6 +134,7 @@ def load(path: Path) -> tuple[dict, pd.DataFrame]:
     times = [l.split(",")[1] for l in lines if l.startswith("#calls,")]
     if len(times) != int(meta["recorded"]) or len(set(times)) != len(times):
         raise AssertionError(f"{path.name}: {len(times)} #calls bars for recorded={meta['recorded']}")
+    check_coverage(path.name, times, days)
     want = {(c["indicator"], str(b), t) for c in calc for b in range(int(c["buffers"])) for t in times}
     got = list(zip(frame["indicator"], frame["buffer"], frame["time"]))
     if len(got) != len(want) or set(got) != want:
@@ -199,7 +225,7 @@ def main() -> None:
             path = work / "MQL5/Files" / f"DLV_TD_Live_{symbol}_{period}.csv"
             if not path.exists():
                 raise AssertionError(f"{symbol} {period}: no {path.name}; see {work / 'MQL5/Logs'}")
-            meta, frame = load(path)
+            meta, frame = load(path, days)
             print(f"{symbol} {period}: {meta['recorded']} closed bars recorded; forming recomputes per bar "
                   f"min {meta['calls_min']} median {meta['calls_median']}", flush=True)
             names = list(dict.fromkeys(frame["indicator"]))
