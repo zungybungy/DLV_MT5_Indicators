@@ -10,9 +10,11 @@
 //      recycles a live Countdown only when its true range is >= the active
 //      Setup's and < 1.618x it. Smaller means the move is fading; 1.618x or more
 //      means exhaustion. Neither recycles. Whichever Setup has the larger true
-//      range becomes the active one, so the TDST line follows it.
+//      range becomes the active one unless Qualifier II keeps the prior Setup
+//      active; the TDST line follows the active Setup.
 //   2. The "R" qualifier. A Setup extending to 18 closes without an intervening
-//      TD Price Flip recycles the developing Countdown on its own, ungated.
+//      TD Price Flip recycles every developing same-direction Countdown, ungated
+//      (Perl Fig 1.18: the R recycles a Countdown seeded by an EARLIER Setup).
 //   3. The Countdown 13 TD Risk Level scanned only bar 13. Perl: "identify the
 //      lowest true low throughout the TD Sequential Buy Countdown process, which
 //      includes bars one through thirteen, whether or not it is a numbered price
@@ -33,14 +35,15 @@
 //   - true-low/true-high Countdown cancellation occurs before advancement;
 //   - Cancellation Qualifier II preserves contained prior Countdowns while the
 //     new Setup starts its own standard and Aggressive Countdown episodes;
-//   - multiple same-direction Countdown episodes advance in parallel;
+//   - multiple same-direction Countdown episodes advance in parallel, and a 13
+//     from any of them is published, not only from the displayed leader;
 //   - Setup Perfection is reported when it becomes known, never back-dated;
 //   - live chart objects are synchronised on every recalculated bar and alerts
 //     fire only for a newly closed bar;
-//   - Setup metadata (true range, TDST, Qualifier II bounds) is measured on the
-//     trailing NINE bars via SetupWindow, at Setup 9, while a run extends, and at
-//     the R bar. Accumulating from the Price Flip published an 18-bar TDST at
-//     every R bar and inflated the range used by the 1.618 recycle gate;
+//   - a Setup's true range and Qualifier II bounds span its whole run from the
+//     Price Flip (Perl: a Setup "can continue indefinitely" and ranges are
+//     compared on Setups that "extend beyond TD Setup bar nine"). TDST is set
+//     only when a Setup completes at bar 9; an extension or an R keeps it;
 //   - buffers 0/1 (TDST Resistance/Support) are CAUSAL. They are published on the
 //     Setup 9 bar and propagate forward, never back-filled across the Setup's own
 //     nine bars. The back-fill was invisible on the chart but fed look-ahead to
@@ -383,32 +386,25 @@ void EnsureActiveCountdownEpisode(TDCountdownEpisode &episodes[])
    SelectActiveCountdownEpisode(episodes, -1);
 }
 
-// A Setup is NINE bars. Its true range, TDST and Qualifier II containment bounds
-// are measured on the nine bars ending at `i` (series indexing, so i..i+8), never
-// on everything accumulated since the Price Flip. Perl's "R" recycle at 18
-// conforming closes stands in for a SECOND nine-bar Setup, so it is measured on
-// that second nine. Accumulating across the whole run publishes an 18-bar TDST at
-// every R bar and stores an inflated setup_range that then skews the 1.618 recycle
-// gate and the active-episode selection for the rest of that Countdown's life.
-//
-// Used by all three consumers — Setup 9 completion, the extension refresh while a
-// run continues, and the R bar. Applying it at only one is pointless: the
-// extension refresh overwrites the R bar's values on the very next bar.
+// A Setup is NOT limited to nine bars. Perl: "the TD Buy Setup process can
+// continue indefinitely" until a Price Flip, and Qualifiers I/II compare ranges of
+// Setups that "extend beyond TD Setup bar nine". So the true range and Qualifier II
+// bounds span the whole run: the `run` bars ending at `i` (series indexing, so
+// i..i+run-1), back to the flip bar. At Setup 9 that is exactly the nine Setup bars.
+// TDST is not taken from here after bar 9: Perl recalculates it only when a Setup
+// completes, and an extension or an R is not a completion.
 void SetupWindow(const double &High[], const double &Low[], const double &Close[],
-                 const int i, const int rates_total,
+                 const int i, const int run, const int rates_total,
                  double &w_true_high, double &w_true_low,
                  double &w_close_high, double &w_close_low)
 {
    w_true_high = -DBL_MAX; w_true_low = DBL_MAX;
    w_close_high = -DBL_MAX; w_close_low = DBL_MAX;
-   for(int k = 0; k < 9; k++)
+   for(int k = 0; k < run; k++)
    {
       int idx = i + k;
-      // Close[idx + 1] must exist. This guard cannot leave a PARTIAL window in
-      // practice: the main loop starts at rates_total - 7 with the run counters
-      // at zero, and every caller needs at least nine conforming bars first
-      // (Setup 9, run > 9, or the R bar at 18), so i is already <= rates_total-16
-      // by the time any of them fire and i + 8 is comfortably in range.
+      // Close[idx + 1] must exist. The flip bar is at least five bars from the
+      // oldest bar (it compares Close[i + 5]), so a run never reaches this guard.
       if(idx >= rates_total - 1) break;
       double th = MathMax(High[idx], Close[idx + 1]);
       double tl = MathMin(Low[idx], Close[idx + 1]);
@@ -560,6 +556,7 @@ int AdvanceCountdownEpisodes(TDCountdownEpisode &episodes[],
    int total = ArraySize(episodes);
    int visible = -1;
    int visible_event = 0;
+   int completed_start = -2;   // -2 = nothing completed on this bar
 
    // Choose the chart-visible leader before any episode advances on this bar.
    for(int i = 0; i < total; i++)
@@ -601,59 +598,10 @@ int AdvanceCountdownEpisodes(TDCountdownEpisode &episodes[],
 
       if(ep.level >= 13)
       {
-         if(is_visible)
-         {
-            visible_event = 13;
-
-            if(!aggressive)
-            {
-               int start = (ep.countdown_start_idx >= bar)
-                  ? ep.countdown_start_idx : bar;
-               int extreme_idx = -1;
-               double extreme = is_buy ? DBL_MAX : -DBL_MAX;
-
-               for(int idx = start; idx >= bar; idx--)
-               {
-                  if(idx >= rates_total - 1) continue;
-                  double true_high = MathMax(High[idx], Close[idx + 1]);
-                  double true_low = MathMin(Low[idx], Close[idx + 1]);
-                  if((is_buy && true_low < extreme) ||
-                     (!is_buy && true_high > extreme))
-                  {
-                     extreme = is_buy ? true_low : true_high;
-                     extreme_idx = idx;
-                  }
-               }
-
-               if(extreme_idx != -1)
-               {
-                  double previous_close = Close[extreme_idx + 1];
-                  double true_high = MathMax(High[extreme_idx], previous_close);
-                  double true_low = MathMin(Low[extreme_idx], previous_close);
-                  double true_range = true_high - true_low;
-                  double risk_level = is_buy ? true_low - true_range
-                                             : true_high + true_range;
-
-                  risk_counter++;
-                  bool use_a = (risk_counter % 2 != 0);
-                  for(int k = 0; k < RiskLineLength; k++)
-                  {
-                     int draw_idx = bar - k;
-                     if(draw_idx < 0) break;
-                     if(use_a)
-                     {
-                        risk_a[draw_idx] = risk_level;
-                        risk_b[draw_idx] = EMPTY_VALUE;
-                     }
-                     else
-                     {
-                        risk_b[draw_idx] = risk_level;
-                        risk_a[draw_idx] = EMPTY_VALUE;
-                     }
-                  }
-               }
-            }
-         }
+         // A 13 from ANY episode is a completed Countdown, visible leader or not.
+         // The risk line comes from the visible one when it is among them.
+         if(completed_start == -2 || is_visible)
+            completed_start = ep.countdown_start_idx;
       }
       else
       {
@@ -671,6 +619,59 @@ int AdvanceCountdownEpisodes(TDCountdownEpisode &episodes[],
 
    ArrayResize(episodes, write);
    EnsureActiveCountdownEpisode(episodes);
+
+   if(completed_start != -2)
+   {
+      visible_event = 13;
+
+      if(!aggressive)
+      {
+         int start = (completed_start >= bar) ? completed_start : bar;
+         int extreme_idx = -1;
+         double extreme = is_buy ? DBL_MAX : -DBL_MAX;
+
+         for(int idx = start; idx >= bar; idx--)
+         {
+            if(idx >= rates_total - 1) continue;
+            double true_high = MathMax(High[idx], Close[idx + 1]);
+            double true_low = MathMin(Low[idx], Close[idx + 1]);
+            if((is_buy && true_low < extreme) ||
+               (!is_buy && true_high > extreme))
+            {
+               extreme = is_buy ? true_low : true_high;
+               extreme_idx = idx;
+            }
+         }
+
+         if(extreme_idx != -1)
+         {
+            double previous_close = Close[extreme_idx + 1];
+            double true_high = MathMax(High[extreme_idx], previous_close);
+            double true_low = MathMin(Low[extreme_idx], previous_close);
+            double true_range = true_high - true_low;
+            double risk_level = is_buy ? true_low - true_range
+                                       : true_high + true_range;
+
+            risk_counter++;
+            bool use_a = (risk_counter % 2 != 0);
+            for(int k = 0; k < RiskLineLength; k++)
+            {
+               int draw_idx = bar - k;
+               if(draw_idx < 0) break;
+               if(use_a)
+               {
+                  risk_a[draw_idx] = risk_level;
+                  risk_b[draw_idx] = EMPTY_VALUE;
+               }
+               else
+               {
+                  risk_b[draw_idx] = risk_level;
+                  risk_a[draw_idx] = EMPTY_VALUE;
+               }
+            }
+         }
+      }
+   }
    return visible_event;
 }
 
@@ -710,7 +711,7 @@ int OnCalculate(const int rates_total,
 
    if (rates_total < 7) return(0);
 
-   int limit = MathMin(rates_total - 7, MathMax(MaxBars, 0));
+   int limit = MathMin(rates_total - 6, MathMax(MaxBars, 0));
    int draw_limit = rates_total - prev_calculated + 2;
    if(prev_calculated == 0) draw_limit = limit;
 
@@ -782,6 +783,8 @@ int OnCalculate(const int rates_total,
    datetime sell_setup_first_time = 0;
    datetime last_buy_setup9_time = 0;
    datetime last_sell_setup9_time = 0;
+   double buy_setup_tdst = 0.0;    // the live run's TDST, fixed at its Setup 9
+   double sell_setup_tdst = 0.0;
 
 
    double buy_setup6_low = 0.0;
@@ -911,7 +914,7 @@ int OnCalculate(const int rates_total,
       if(buy_run > 9)
       {
          double w_th, w_tl, w_ch, w_cl;
-         SetupWindow(High, Low, Close, i, rates_total, w_th, w_tl, w_ch, w_cl);
+         SetupWindow(High, Low, Close, i, buy_run, rates_total, w_th, w_tl, w_ch, w_cl);
          double range = w_th - w_tl;
          UpdateSetupEpisodes(buy_standard, buy_setup_id, range,
                              w_th, w_tl, w_ch, w_cl);
@@ -921,13 +924,22 @@ int OnCalculate(const int rates_total,
       if(sell_run > 9)
       {
          double w_th, w_tl, w_ch, w_cl;
-         SetupWindow(High, Low, Close, i, rates_total, w_th, w_tl, w_ch, w_cl);
+         SetupWindow(High, Low, Close, i, sell_run, rates_total, w_th, w_tl, w_ch, w_cl);
          double range = w_th - w_tl;
          UpdateSetupEpisodes(sell_standard, sell_setup_id, range,
                              w_th, w_tl, w_ch, w_cl);
          UpdateSetupEpisodes(sell_aggressive, sell_setup_id, range,
                              w_th, w_tl, w_ch, w_cl);
       }
+
+      // True-range cancellation runs before this bar's Setup reconciliation, so a
+      // Countdown cancelled on this bar can never be named active by Qualifier II.
+      // A Setup completing here cannot cancel its own new Countdown: its TDST
+      // includes this bar's true extreme.
+      CancelEpisodesByTrueExtreme(buy_standard, true, true_high, true_low);
+      CancelEpisodesByTrueExtreme(buy_aggressive, true, true_high, true_low);
+      CancelEpisodesByTrueExtreme(sell_standard, false, true_high, true_low);
+      CancelEpisodesByTrueExtreme(sell_aggressive, false, true_high, true_low);
 
       if(buy_setup_completed)
       {
@@ -938,8 +950,9 @@ int OnCalculate(const int rates_total,
          buy_perfection_pending = true;
 
          double w_th, w_tl, w_ch, w_cl;
-         SetupWindow(High, Low, Close, i, rates_total, w_th, w_tl, w_ch, w_cl);
+         SetupWindow(High, Low, Close, i, buy_run, rates_total, w_th, w_tl, w_ch, w_cl);
          double setup_range = w_th - w_tl;
+         buy_setup_tdst = w_th;
          ReconcileCountdownEpisodes(buy_standard, true, false,
                                     buy_setup_id, Time[i], last_sell_setup9_time,
                                     setup_range, w_th, w_tl,
@@ -995,8 +1008,9 @@ int OnCalculate(const int rates_total,
          sell_perfection_pending = true;
 
          double w_th, w_tl, w_ch, w_cl;
-         SetupWindow(High, Low, Close, i, rates_total, w_th, w_tl, w_ch, w_cl);
+         SetupWindow(High, Low, Close, i, sell_run, rates_total, w_th, w_tl, w_ch, w_cl);
          double setup_range = w_th - w_tl;
+         sell_setup_tdst = w_tl;
          ReconcileCountdownEpisodes(sell_standard, false, false,
                                     sell_setup_id, Time[i], last_buy_setup9_time,
                                     setup_range, w_th, w_tl,
@@ -1041,39 +1055,40 @@ int OnCalculate(const int rates_total,
 
       bool buy_r = (buy_run == 18 && ArraySize(buy_standard) > 0);
       bool sell_r = (sell_run == 18 && ArraySize(sell_standard) > 0);
+      // R recycles with the whole 18-bar run's range, but keeps the Setup-9 TDST:
+      // an R is not a Setup completion, so neither the line nor the new
+      // Countdown's cancellation level is re-measured.
       if(buy_r)
       {
          double w_th, w_tl, w_ch, w_cl;
-         SetupWindow(High, Low, Close, i, rates_total, w_th, w_tl, w_ch, w_cl);
+         SetupWindow(High, Low, Close, i, buy_run, rates_total, w_th, w_tl, w_ch, w_cl);
          double setup_range = w_th - w_tl;
          ReconcileCountdownEpisodes(buy_standard, true, true,
                                     buy_setup_id, Time[i], last_sell_setup9_time,
                                     setup_range, w_th, w_tl,
                                     w_ch, w_cl,
-                                    w_th);
+                                    buy_setup_tdst);
          ReconcileCountdownEpisodes(buy_aggressive, true, true,
                                     buy_setup_id, Time[i], last_sell_setup9_time,
                                     setup_range, w_th, w_tl,
                                     w_ch, w_cl,
-                                    w_th);
-         Resistance[i] = ActiveEpisodeTDST(buy_standard, w_th);
+                                    buy_setup_tdst);
       }
       if(sell_r)
       {
          double w_th, w_tl, w_ch, w_cl;
-         SetupWindow(High, Low, Close, i, rates_total, w_th, w_tl, w_ch, w_cl);
+         SetupWindow(High, Low, Close, i, sell_run, rates_total, w_th, w_tl, w_ch, w_cl);
          double setup_range = w_th - w_tl;
          ReconcileCountdownEpisodes(sell_standard, false, true,
                                     sell_setup_id, Time[i], last_buy_setup9_time,
                                     setup_range, w_th, w_tl,
                                     w_ch, w_cl,
-                                    w_tl);
+                                    sell_setup_tdst);
          ReconcileCountdownEpisodes(sell_aggressive, false, true,
                                     sell_setup_id, Time[i], last_buy_setup9_time,
                                     setup_range, w_th, w_tl,
                                     w_ch, w_cl,
-                                    w_tl);
-         Support[i] = ActiveEpisodeTDST(sell_standard, w_tl);
+                                    sell_setup_tdst);
       }
 
       if(buy_perfection_pending && buy_perfection6_low != 0.0 && buy_perfection7_low != 0.0)
@@ -1104,12 +1119,6 @@ int OnCalculate(const int rates_total,
             if(AlertOnPerfecting) DoAlert(i, ALERT_TYPE_PERFECTING_SELL);
          }
       }
-
-      // Cancellation is evaluated before the bar is allowed to advance a count.
-      CancelEpisodesByTrueExtreme(buy_standard, true, true_high, true_low);
-      CancelEpisodesByTrueExtreme(buy_aggressive, true, true_high, true_low);
-      CancelEpisodesByTrueExtreme(sell_standard, false, true_high, true_low);
-      CancelEpisodesByTrueExtreme(sell_aggressive, false, true_high, true_low);
 
       int buy_event = AdvanceCountdownEpisodes(
          buy_standard, true, false, i, rates_total, High, Low, Close,
