@@ -118,6 +118,18 @@ def verify_reference(seq: Path, ma: Path) -> None:
     must_worsen(ma, "bullish", "TD_MA1", lambda df, params: ma_fn(df, [5, 12, 3]))
     must_worsen(ma, "bearish", "TD_MA1", lambda df, params: ma_fn(df, [6, 12, 4]))
     print("Reference drift rejected (Setup 9, TDST 1e-9, Aggressive +1, TD_MA1 extend 3 / period 6)", flush=True)
+    # A file lying wholly inside the warm-up compares nothing, so it must FAIL
+    # even when every buffer is garbage rather than pass with "0 bars compared".
+    stub = pd.read_csv(ma).head(parity.MA_WARMUP)
+    stub[["bullish", "bearish"]] = 999999.0
+    stub_path = ma.with_name("warmup_only_TD_MA1.csv")
+    stub.to_csv(stub_path, index=False)
+    try:
+        parity.check(stub_path, verbose=False)
+    except ValueError:
+        print("Warm-up-only file rejected (nothing compared)", flush=True)
+    else:
+        raise AssertionError("A file with no post-warm-up bars passed the parity gate")
 
 
 def main() -> None:

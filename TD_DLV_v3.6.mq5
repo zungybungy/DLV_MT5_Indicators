@@ -11,7 +11,10 @@
 //      Setup's and < 1.618x it. Smaller means the move is fading; 1.618x or more
 //      means exhaustion. Neither recycles. Whichever Setup has the larger true
 //      range becomes the active one unless Qualifier II keeps the prior Setup
-//      active; the TDST line follows the active Setup.
+//      active. That governs the Countdowns only: the TDST line is always the
+//      most recently completed Setup's own extreme (Perl p.14: "TDST Resistance,
+//      in other words, the true high of the most recently completed TD Buy
+//      Setup"), so a level a close already broke is never redrawn.
 //   2. The "R" qualifier. A Setup extending to 18 closes without an intervening
 //      TD Price Flip recycles every developing same-direction Countdown, ungated
 //      (Perl Fig 1.18: the R recycles a Countdown seeded by an EARLIER Setup).
@@ -524,20 +527,6 @@ void CancelEpisodesByTrueExtreme(TDCountdownEpisode &episodes[],
    EnsureActiveCountdownEpisode(episodes);
 }
 
-double ActiveEpisodeTDST(const TDCountdownEpisode &episodes[], const double fallback)
-{
-   int total = ArraySize(episodes);
-   if(total == 0) return fallback;
-
-   for(int i = 0; i < total; i++)
-      if(episodes[i].is_active) return episodes[i].tdst;
-
-   int largest = 0;
-   for(int i = 1; i < total; i++)
-      if(episodes[i].setup_range > episodes[largest].setup_range) largest = i;
-   return episodes[largest].tdst;
-}
-
 int AdvanceCountdownEpisodes(TDCountdownEpisode &episodes[],
                              const bool is_buy,
                              const bool aggressive,
@@ -971,7 +960,7 @@ int OnCalculate(const int rates_total,
          // chart, but look-ahead for any iCustom consumer reading buffer 0 over
          // history. The propagation at the top of the loop carries this forward to
          // later bars and voids it on a close-through.
-         Resistance[i] = ActiveEpisodeTDST(buy_standard, w_th);
+         Resistance[i] = w_th;
 
          double min_true_low = DBL_MAX;
          int min_idx = -1;
@@ -1025,7 +1014,7 @@ int OnCalculate(const int rates_total,
 
          // CAUSAL: see the buy-side note above. Publish on the completion bar only
          // and let the loop's propagation carry it forward.
-         Support[i] = ActiveEpisodeTDST(sell_standard, w_tl);
+         Support[i] = w_tl;
 
          double max_true_high = -DBL_MAX;
          int max_idx = -1;

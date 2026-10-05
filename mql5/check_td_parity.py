@@ -90,7 +90,9 @@ def check(path: Path, verbose: bool = True) -> tuple[str, int, dict[str, int]]:
         start = MA_WARMUP
     else:
         raise ValueError(f"Unknown indicator {name}")
-    lines, counts = [f"{name} {path.name}: {len(frame) - start:,} bars compared"], {}
+    if len(frame) <= start:
+        raise ValueError(f"No bars after the {start}-bar warm-up; nothing was compared")
+    lines, counts =[f"{name} {path.name}: {len(frame) - start:,} bars compared"], {}
     for column, (mapping, target) in want.items():
         actual = frame[column].to_numpy(dtype=float)
         # Price levels are copied prices or a 5-term SMA (summation order only).
