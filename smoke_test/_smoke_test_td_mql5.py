@@ -1,8 +1,9 @@
-"""Bar-for-bar TD_SEQ / TD_MA1 parity in an isolated, non-trading portable MT5.
+"""Bar-for-bar TD_SEQ / TD_MA1 / TD_POINT parity in an isolated, non-trading portable MT5.
 
-Windows-only integration test. Compiles TD_DLV_v3.6, DLV_TD_MA and the export
-script, copies terminal64.exe, symbol definitions and cached broker bars from
-the live terminal (read-only) into scratch/, exports both indicators' buffers
+Windows-only integration test. Compiles TD_DLV_v3.6, DLV_TD_MA, DLV_TD_Point and
+the export script, copies terminal64.exe, symbol definitions and cached broker bars from
+the live terminal (read-only) into scratch/, exports every indicator's buffers
+(DLV_TD_Point at Levels 1 and 3)
 on every SYMBOL x PERIOD, then gates them with mql5/check_td_parity.py.
 No account credentials, orders or file deletions; artifacts are retained.
 
@@ -35,6 +36,7 @@ SYMBOLS = {
     "BTCUSD.a": "Pepperstone-MT5-Live01/history/BTCUSD.a",
 }
 PERIODS = ("D1", "H4", "H1", "M15")
+INDICATORS = ("TD_SEQ", "TD_MA1", "TD_POINT_L1", "TD_POINT_L3")
 
 
 def hidden_run(command: str, timeout: int) -> None:
@@ -82,7 +84,7 @@ def execute(terminal: Path, work: Path, symbol: str, period: str, prefix: str) -
     hidden_run(f'"{terminal}" /portable /config:"{config}"', timeout=600)
 
 
-def verify_reference(seq: Path, ma: Path) -> None:
+def verify_reference(seq: Path, ma: Path, point: Path) -> None:
     """A vacuous checker must be impossible: each perturbed Lab reference must
     strictly increase the targeted column's mismatches (TD_SEQ already fails
     some columns, so "still fails" alone would prove nothing)."""
@@ -117,7 +119,18 @@ def verify_reference(seq: Path, ma: Path) -> None:
     must_worsen(seq, "aggressive_countdown", "TD_SEQ", countdown_plus_one)
     must_worsen(ma, "bullish", "TD_MA1", lambda df, params: ma_fn(df, [5, 12, 3]))
     must_worsen(ma, "bearish", "TD_MA1", lambda df, params: ma_fn(df, [6, 12, 4]))
-    print("Reference drift rejected (Setup 9, TDST 1e-9, Aggressive +1, TD_MA1 extend 3 / period 6)", flush=True)
+
+    # The confirmation lag is the deliverable: a reference publishing every TD
+    # Point ONE bar early (one bar of hindsight) must fail on price and flag.
+    point_fn = parity.rules.PSEUDO_REGISTRY["TD_POINT"]
+
+    def one_bar_early(df: pd.DataFrame, params: list) -> tuple:
+        return tuple(s.shift(-1) for s in point_fn(df, params))
+
+    must_worsen(point, "demand", "TD_POINT", one_bar_early)
+    must_worsen(point, "supply_confirmed", "TD_POINT", one_bar_early)
+    print("Reference drift rejected (Setup 9, TDST 1e-9, Aggressive +1, TD_MA1 extend 3 / period 6, "
+          "TD_POINT one bar early)", flush=True)
     # A file lying wholly inside the warm-up compares nothing, so it must FAIL
     # even when every buffer is garbage rather than pass with "0 bars compared".
     stub = pd.read_csv(ma).head(parity.MA_WARMUP)
@@ -151,7 +164,7 @@ def main() -> None:
     shutil.copytree(args.terminal_data / "bases/Default/Symbols", work / "bases/Default/Symbols")
     for symbol, history in SYMBOLS.items():
         install_history(args.terminal_data / "bases" / history, work / "bases/Default/History" / symbol)
-    for name in ("TD_DLV_v3.6", "DLV_TD_MA"):
+    for name in ("TD_DLV_v3.6", "DLV_TD_MA", "DLV_TD_Point"):
         shutil.copy2(compile_mql(ROOT / f"{name}.mq5", args.editor, work), work / f"MQL5/Indicators/{name}.ex5")
     compile_mql(ROOT / "mql5/Scripts/DLV_TD_Export.mq5", args.editor, work)
     # Only the runner-owned copy writes to the portable terminal's local Files.
@@ -165,10 +178,12 @@ def main() -> None:
             prefix = f"DLV_TD_{runid}"
             execute(terminal, work, symbol, period, prefix)
             found = sorted(files.glob(f"{prefix}_{symbol}_PERIOD_{period}_*.csv"))
-            if [p.name[-10:] for p in found] != ["TD_MA1.csv", "TD_SEQ.csv"]:
-                raise AssertionError(f"{symbol} {period}: expected TD_MA1 and TD_SEQ CSVs, found {[p.name for p in found]}")
+            names = sorted(n for p in found for n in INDICATORS if p.name.endswith(f"_{n}.csv"))
+            if len(found) != len(INDICATORS) or names != sorted(INDICATORS):
+                raise AssertionError(f"{symbol} {period}: expected {INDICATORS}, found {[p.name for p in found]}")
             paths += found
-    print(f"Exported {len(paths)} CSVs ({len(SYMBOLS)} symbols x {len(PERIODS)} periods x 2 indicators)", flush=True)
+    print(f"Exported {len(paths)} CSVs ({len(SYMBOLS)} symbols x {len(PERIODS)} periods x "
+          f"{len(INDICATORS)} indicators)", flush=True)
     failed, bars, summary = [], 0, []
     for path in paths:
         name, n, counts = parity.check(path)
@@ -179,7 +194,8 @@ def main() -> None:
             failed.append(path.name)
     print("Summary (mismatches per mapped column):", *summary, sep="\n", flush=True)
     verify_reference(next(p for p in paths if "_EURUSD_PERIOD_D1_" in p.name and p.name.endswith("TD_SEQ.csv")),
-                     next(p for p in paths if "_EURUSD_PERIOD_D1_" in p.name and p.name.endswith("TD_MA1.csv")))
+                     next(p for p in paths if "_EURUSD_PERIOD_D1_" in p.name and p.name.endswith("TD_MA1.csv")),
+                     next(p for p in paths if "_EURUSD_PERIOD_D1_" in p.name and p.name.endswith("TD_POINT_L3.csv")))
     if failed:
         raise SystemExit(f"FAIL: {len(failed)}/{len(paths)} CSVs differ from the Lab ({bars:,} bars compared)")
     print(f"All {len(paths)} TD parity CSVs passed ({bars:,} bars compared)", flush=True)

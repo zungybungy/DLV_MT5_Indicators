@@ -2,11 +2,13 @@
 #property version "1.00"
 #property script_show_inputs
 
-// Read-only terminal-bar dump of TD_DLV_v3.6 (14 buffers) and DLV_TD_MA (2) for
-// mql5/check_td_parity.py. Both run with MaxBars=INT_MAX and the CSV starts on
-// the oldest bar the indicator saw (its rates_total), so every state machine
-// starts on the same bar as the Python reference. The forming bar is omitted:
-// both indicators deliberately paint it. No orders or login changes.
+// Read-only terminal-bar dump of TD_DLV_v3.6 (14 buffers), DLV_TD_MA (2) and
+// DLV_TD_Point at Levels 1 and 3 (6 each; the levels the Lab presets trade) for
+// mql5/check_td_parity.py. Each runs over all bars (MaxBars=INT_MAX where it has
+// one) and the CSV starts on the oldest bar the indicator saw (its rates_total),
+// so every state machine starts on the same bar as the Python reference. The
+// forming bar is omitted: the indicators deliberately paint it. No orders or
+// login changes.
 input string InpFilePrefix="DLV_TD";
 
 string Cell(const double x) { return x==EMPTY_VALUE?"":StringFormat("%.17g",x); }
@@ -77,5 +79,8 @@ void OnStart()
       "aggressive_countdown",prefix)) return;
    if(!Export("TD_MA1",iCustom(_Symbol,_Period,"DLV_TD_MA","",5,12,4,INT_MAX),2,
       "bullish,bearish",prefix)) return;
+   for(int level=1;level<=3;level+=2)
+      if(!Export("TD_POINT_L"+IntegerToString(level),iCustom(_Symbol,_Period,"DLV_TD_Point","",level),6,
+         "demand,supply,demand_confirmed,supply_confirmed,prior_demand,prior_supply",prefix)) return;
    Print("TD export finished: ",TerminalInfoString(TERMINAL_COMMONDATA_PATH),"\\Files\\",prefix,"_*.csv");
 }

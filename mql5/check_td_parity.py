@@ -1,4 +1,4 @@
-"""Compare TD_DLV_v3.6 / DLV_TD_MA CSV buffers with the Lab's TD_SEQ / TD_MA1.
+"""Compare TD_DLV_v3.6 / DLV_TD_MA / DLV_TD_Point CSV buffers with the Lab's TD_SEQ / TD_MA1 / TD_POINT.
 
     python mql5/check_td_parity.py "C:/.../Common/Files/DLV_TD_*.csv"
 
@@ -26,6 +26,7 @@ MA_PARAMS = [5, 12, 4]  # DLV_TD_MA inputs passed by DLV_TD_Export
 # DLV_TD_MA waits for one. Only a qualification on bar `lookback` can differ, and
 # it extends `extend` bars. Excluded and reported, never silently dropped.
 MA_WARMUP = MA_PARAMS[1] + MA_PARAMS[2]
+POINT_COLUMNS = ("demand", "supply", "demand_confirmed", "supply_confirmed", "prior_demand", "prior_supply")
 UNMAPPED = {
     "TD_SEQ": ["MQL5 buffers 5-12 (Setup/Countdown risk lines A/B): no Lab counterpart, not compared",
                "Lab outputs 2/3 parked levels (-n): MQL5 publishes 0 (or 14 for a bar-13 deferral)",
@@ -88,6 +89,11 @@ def check(path: Path, verbose: bool = True) -> tuple[str, int, dict[str, int]]:
         out = lab_outputs(frame, "TD_MA1", MA_PARAMS)
         want = {"bullish": ("buffer 0 <- Lab 0", out[0]), "bearish": ("buffer 1 <- Lab 1", out[1])}
         start = MA_WARMUP
+    elif name.startswith("TD_POINT_L"):
+        # Six buffers in the Lab's output order, published N bars late on both sides.
+        out = lab_outputs(frame, "TD_POINT", [int(name[len("TD_POINT_L"):])])
+        want = {column: (f"buffer {k} <- Lab {k}", out[k]) for k, column in enumerate(POINT_COLUMNS)}
+        start = 0
     else:
         raise ValueError(f"Unknown indicator {name}")
     if len(frame) <= start:
@@ -97,7 +103,7 @@ def check(path: Path, verbose: bool = True) -> tuple[str, int, dict[str, int]]:
         actual = frame[column].to_numpy(dtype=float)
         # Price levels are copied prices or a 5-term SMA (summation order only).
         tolerance = dict(rtol=1e-12, atol=0) if column in ("tdst_resistance", "tdst_support", "bullish", "bearish") \
-            else dict(rtol=0, atol=0)
+            else dict(rtol=0, atol=0)   # TD Point prices are copied lows/highs: exact
         match = np.isclose(actual, target, equal_nan=True, **tolerance)
         bad = np.flatnonzero(~match[start:]) + start
         counts[column] = len(bad)
@@ -112,7 +118,7 @@ def check(path: Path, verbose: bool = True) -> tuple[str, int, dict[str, int]]:
         for j in range(max(0, i - 2), i + 1):
             o, h, l, c = (float(frame[k].iloc[j]) for k in ("Open", "High", "Low", "Close"))
             lines.append(f"       bar {j} {frame.index[j]} O={o!r} H={h!r} L={l!r} C={c!r}")
-    lines += [f"  not compared: {note}" for note in UNMAPPED[name]]
+    lines += [f"  not compared: {note}" for note in UNMAPPED.get(name, [])]
     if verbose:
         print("\n".join(lines), flush=True)
     return name, len(frame) - start, counts
