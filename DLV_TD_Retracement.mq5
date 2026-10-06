@@ -19,13 +19,15 @@
 //     downside level = High[Z] - RelRatio * (High[Z] - Low[Y]); magnet = Close[Y].
 //   A side stays empty until a Z has an X; then level and magnet hold until the
 //   next such Z of that side (each replacement starts a new level generation).
-//   Breaks (the TD Line qualifiers), upside level U on bar t:
+//   Breaks (the TD Line qualifiers, Q2 with the retracement clause), upside
+//   level U on bar t:
 //     break   High[t] > U
 //     Q1      Close[t-1] < Close[t-2]
-//     Q2      Open[t] > U
+//     Q2      Open[t] > U and High[t] > Open[t]   (opens above U "and then trades
+//             one tick above the open", Perl p.106; OHLC reading, no tick size)
 //     Q3      2*Close[t-1] - min(Low[t-1], Close[t-2]) < U   (needs bar t-2)
 //     qualified = break and (Q1 or Q2 or Q3); disqualified = break and none.
-//   Downside mirrored (Low < D, Close[t-1] > Close[t-2], Open < D,
+//   Downside mirrored (Low < D, Close[t-1] > Close[t-2], Open < D and Low < Open,
 //   2*Close[t-1] - max(High[t-1], Close[t-2]) > D). Only a FRESH break counts:
 //   the prior bar was not beyond the level, or the level generation changed.
 // TD Absolute Retracement (Lab TD_ABS_RETRACEMENT):
@@ -213,13 +215,13 @@ void Step(RetState &s, const int t, const double &open[], const double &high[], 
    bool has2 = (t >= 2);
    if(up_beyond && (!s.up_beyond || s.up_gen != prev_up_gen))
    {
-      bool q = (has2 && close[t - 1] < close[t - 2]) || open[t] > s.up ||
+      bool q = (has2 && close[t - 1] < close[t - 2]) || (open[t] > s.up && high[t] > open[t]) ||
                (has2 && 2.0 * close[t - 1] - MathMin(low[t - 1], close[t - 2]) < s.up);
       upper_ok = q; upper_bad = !q;
    }
    if(down_beyond && (!s.down_beyond || s.down_gen != prev_down_gen))
    {
-      bool q = (has2 && close[t - 1] > close[t - 2]) || open[t] < s.down ||
+      bool q = (has2 && close[t - 1] > close[t - 2]) || (open[t] < s.down && low[t] < open[t]) ||
                (has2 && 2.0 * close[t - 1] - MathMax(high[t - 1], close[t - 2]) > s.down);
       lower_ok = q; lower_bad = !q;
    }

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -43,7 +44,8 @@ def compile_mql(source: Path, editor: Path, work: Path) -> Path:
     # in the raw Windows command line. subprocess still runs without a shell.
     hidden_run(f'"{editor}" /compile:"{source}" /inc:"{ROOT / "mql5"}" /log:"{log}"')
     result = log.read_text(encoding="utf-16")
-    if "0 errors, 0 warnings" not in result:
+    # Anchored: a bare substring test also accepts "100 errors, 0 warnings".
+    if not re.search(r"^Result: 0 errors, 0 warnings", result, re.M):
         raise AssertionError(result)
     print(f"Compiled {source.name}: 0 errors, 0 warnings", flush=True)
     return source.with_suffix(".ex5")

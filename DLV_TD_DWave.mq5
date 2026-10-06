@@ -30,7 +30,10 @@
 //           moves Wave 5 there; after the lock it starts a fresh Wave 1 whose
 //           origin is the Wave C close.
 //   Shallow pullbacks: in Waves 1, 3 and 5 a close beyond the wave's close moves
-//   that wave to the new bar. Moved anchors never revise bars already output.
+//   that wave to the new bar. Waves 2 and A likewise trail to their extreme
+//   close while active (bull: a lower close), since Perl p.76-80 reads "the low
+//   close of TD D-Wave 2 / A" for the violation, C-lock and projections.
+//   Moved anchors never revise bars already output.
 //
 // Projections (Close-based, 1.618):
 //   Wave 3 = origin + 1.618 * (Wave 1 - origin)       from Wave 1 on
@@ -210,6 +213,7 @@ int Advance(Wave &w, const double &close[], const int i, const bool bull)
       case 2:
          if(Against(x, w.origin, bull)) { Inactive(w, close, i, bull); return 0; }
          if(Thrust(close, i, 20, bull) && Beyond(x, w.w1, bull)) { w.phase = 3; w.w3 = x; return 3; }
+         if(Against(x, w.w2, bull)) w.w2 = x;
          return 0;
       case 3:
          if(Pullback(close, i, 12, bull))
@@ -235,6 +239,7 @@ int Advance(Wave &w, const double &close[], const int i, const bool bull)
             w.phase = 7;
             return 7;
          }
+         if(Against(x, w.a, bull)) w.a = x;
          return 0;
       case 7:
          if(Beyond(x, w.w5, bull)) { ShiftWave5(w, x); return 0; }

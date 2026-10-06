@@ -229,10 +229,14 @@ def drift_dwave(dwave: Path) -> None:
         # Drops rule 7: a break of a locked Wave 5 starts a fresh Wave 1.
         out = list(dwave_fn(df, params))
         out[2] = out[2].where(~((out[2] == 1) & (out[0].shift(1) == 8)), 0.0)
+        out[3] = out[3].where(~((out[3] == 1) & (out[1].shift(1) == 8)), 0.0)
         return tuple(out)
 
     must_worsen(dwave, "bull_event", "TD_DWAVE", one_bar_early)
-    must_worsen(dwave, "bull_event", "TD_DWAVE", no_fresh_wave1_after_lock)
+    # Gated on the bearish mirror: since Wave A trails to its extreme close
+    # (Perl p.76-77), EURUSD D1 has no bullish post-lock Wave 1 left, but 5
+    # bearish ones.
+    must_worsen(dwave, "bear_event", "TD_DWAVE", no_fresh_wave1_after_lock)
     must_worsen(dwave, "bear_w5", "TD_DWAVE",
                 lambda df, params: tuple(s * (1 + 1e-12) if k == 7 else s
                                          for k, s in enumerate(dwave_fn(df, params))))
@@ -244,10 +248,10 @@ def drift_waldo(waldo: Path) -> None:
     # WALDO4 (traded by td_waldo4_long): the age boundary `t - X >= min_age`
     # made strict is exactly min_age + 1.
     must_worsen(waldo, "w4_bottom", "TD_WALDO4", lambda df, params: w4(df, [int(params[0]) + 1]))
-    must_worsen(waldo, "w4_top", "TD_WALDO4", lambda df, params: w4(df, [int(params[0]) + 1]))
 
-    def w4_bottom(df: pd.DataFrame, min_age: int, consume: bool) -> pd.Series:
-        # Minimal WALDO4 bottom replica; consume=True must equal the Lab (asserted).
+    def w4_bottom(df: pd.DataFrame, min_age: int, consume: bool, strict: bool = True) -> pd.Series:
+        # Minimal WALDO4 bottom replica; consume=strict=True must equal the Lab (asserted).
+        # strict=False drops Perl p.173's "X is the lowest price" (no younger lower record).
         l, c = df["Low"].to_numpy(float), df["Close"].to_numpy(float)
         out, records, used, record = parity.np.zeros(len(l)), [], set(), float("inf")
         for t in range(len(l)):
@@ -255,18 +259,30 @@ def drift_waldo(waldo: Path) -> None:
                 record = l[t]
                 records.append(t)
             aged = [x for x in records if t - x >= min_age]
-            if t >= 2 and aged and aged[-1] not in used and l[t - 1] < l[aged[-1]] and l[t] < l[aged[-1]] \
+            clean = not (strict and aged and any(aged[-1] < r <= t - 2 for r in records))
+            if t >= 2 and aged and clean and aged[-1] not in used and l[t - 1] < l[aged[-1]] and l[t] < l[aged[-1]] \
                     and c[t - 1] < c[t - 2] and c[t] < c[t - 1]:
                 out[t] = 1.0
                 if consume:
                     used.add(aged[-1])
         return pd.Series(out, index=df.index)
 
+    def w4_top(df: pd.DataFrame, min_age: int, consume: bool, strict: bool = True) -> pd.Series:
+        # The exact mirror: a top on (High, Close) is a bottom on (-High, -Close).
+        return w4_bottom(df.assign(Low=-df["High"], Close=-df["Close"]), min_age, consume, strict)
+
     frame = pd.read_csv(waldo)
     assert (w4_bottom(frame, 10, True).to_numpy() == w4(frame, [10])[0].to_numpy()).all(), "WALDO4 replica drifted"
-    # Each aged record fires once: a reference that re-fires on a consumed record must fail.
+    assert (w4_top(frame, 10, True).to_numpy() == w4(frame, [10])[1].to_numpy()).all(), "WALDO4 replica drifted"
+    # No consume-once control: under Perl p.173 a flag needs Low[t-1] < Low[X], which makes
+    # t-1 a younger lower record, so X can never re-fire and a non-consuming reference is
+    # identical by construction. Instead, dropping p.173's "X is the lowest price" (a younger,
+    # more extreme record blocks X) must fail on both sides. (It also replaces min_age + 1
+    # on tops, which no longer moves any EURUSD D1 top.)
     must_worsen(waldo, "w4_bottom", "TD_WALDO4",
-                lambda df, params: (w4_bottom(df, int(params[0]), False), w4(df, params)[1]))
+                lambda df, params: (w4_bottom(df, int(params[0]), True, strict=False), w4(df, params)[1]))
+    must_worsen(waldo, "w4_top", "TD_WALDO4",
+                lambda df, params: (w4(df, params)[0], w4_top(df, int(params[0]), True, strict=False)))
     # WALDO7's TD Point is known on p+1: flags one bar early must fail.
     must_worsen(waldo, "w7_bottom", "TD_WALDO7", lambda df, params: tuple(b3_early(s) for s in w7(df, params)))
     # WALDO2 freshness window off by one bar.
@@ -304,7 +320,8 @@ def drift_retracement(ret: Path) -> None:
     def every_break(df: pd.DataFrame, params: list) -> tuple:
         # The fresh-break gate dropped: every bar beyond the level is an event.
         out = list(rel(df, params))
-        out[4] = parity.rules._td_breakout_qualifiers(df, out[0], "upper")[3].astype(float)
+        out[4] = parity.rules._td_breakout_qualifiers(
+            df, out[0], "upper", q2_trades_beyond_open=True)[3].astype(float)
         return tuple(out)
 
     must_worsen(ret, "rel_upper_ok", "TD_REL_RETRACEMENT", every_break)

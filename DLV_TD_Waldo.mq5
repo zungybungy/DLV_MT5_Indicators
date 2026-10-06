@@ -24,7 +24,9 @@
 //            least MinAge4 bars old. bottom when Low[t-1] < Low[X], Low[t] < Low[X],
 //            Close[t-1] < Close[t-2] and Close[t] < Close[t-1]; top mirrored.
 //            Each record fires at most once; a consumed record still blocks
-//            older ones until a newer record matures (no fallback).
+//            older ones until a newer record matures (no fallback). X must
+//            still be the lowest (highest) price: a younger record in (X, t-2]
+//            that has not matured blocks the flag (Perl p.173).
 //   Waldo 5  bottom: Close[t] == Close[t-1] and Close[t-1] < Close[t-2] (exact);
 //            top:    Close[t] == Close[t-1] and Close[t-1] > Close[t-2].
 //   Waldo 6  bottom: Low[t] < every Low of the Lookback6 prior bars and
@@ -278,7 +280,8 @@ void Stateful(const int t, const bool commit, const double &high[], const double
    if(t >= 2 && lsel >= 0)
    {
       int xl = g_low_rec[lsel];
-      if(!g_low_used[lsel] && low[t - 1] < low[xl] && low[t] < low[xl] &&
+      bool clean = (lsel + 1 >= nl || g_low_rec[lsel + 1] >= t - 1);
+      if(!g_low_used[lsel] && clean && low[t - 1] < low[xl] && low[t] < low[xl] &&
          close[t - 1] < close[t - 2] && close[t] < close[t - 1])
       {
          w4b = 1.0;
@@ -288,7 +291,8 @@ void Stateful(const int t, const bool commit, const double &high[], const double
    if(t >= 2 && hsel >= 0)
    {
       int xh = g_high_rec[hsel];
-      if(!g_high_used[hsel] && high[t - 1] > high[xh] && high[t] > high[xh] &&
+      bool clean = (hsel + 1 >= nh || g_high_rec[hsel + 1] >= t - 1);
+      if(!g_high_used[hsel] && clean && high[t - 1] > high[xh] && high[t] > high[xh] &&
          close[t - 1] > close[t - 2] && close[t] > close[t - 1])
       {
          w4t = 1.0;
