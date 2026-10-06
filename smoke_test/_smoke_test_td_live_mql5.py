@@ -46,17 +46,24 @@ PRELOAD, START, STOP = "2022-09-01", "2024-09-01", "2026-09-01"
 INDICATORS = {n: m for n, m in smoke.INDICATORS.items() if m}  # DEMARKER is native: not ours
 SCRIPT = "DLV_TD_LiveReplay"
 # Per-bar OnCalculate counter riding in the same symbol thread: proves forming
-# bars were recalculated and paces the replay.
+# bars were recalculated (buffer 0) and paces the replay (buffer 1, the running
+# total of calls: a per-bar count can read the same across a new bar). Buffer 1
+# needs its own plot: with indicator_plots 0, CopyBuffer of buffer 1 returns -1.
 COUNTER = """#property indicator_chart_window
-#property indicator_buffers 1
-#property indicator_plots 0
-double C[];
-int OnInit() { SetIndexBuffer(0,C,INDICATOR_DATA); return INIT_SUCCEEDED; }
+#property indicator_buffers 2
+#property indicator_plots 2
+#property indicator_type1 DRAW_NONE
+#property indicator_type2 DRAW_NONE
+double C[],T[];
+double total=0;
+int OnInit() { SetIndexBuffer(0,C,INDICATOR_DATA); SetIndexBuffer(1,T,INDICATOR_DATA); return INIT_SUCCEEDED; }
 int OnCalculate(const int rates_total,const int prev_calculated,const int begin,const double &price[])
 {
-   if(prev_calculated==0) { ArrayInitialize(C,0); C[rates_total-1]=1; return rates_total; }
-   for(int i=prev_calculated;i<rates_total;i++) C[i]=0;
+   total++;
+   if(prev_calculated==0) { ArrayInitialize(C,0); ArrayInitialize(T,0); C[rates_total-1]=1; T[rates_total-1]=total; return rates_total; }
+   for(int i=prev_calculated;i<rates_total;i++) { C[i]=0; T[i]=0; }
    C[rates_total-1]+=1;
+   T[rates_total-1]=total;
    return rates_total;
 }
 """

@@ -113,9 +113,11 @@ double One(const int handle,const int buffer,const int shift)
 void Record(Feed &p,const datetime start)
 {
    for(int waited=0;waited<10000 && iTime(InpCustom,p.tf,0)!=start && !IsStopped();waited++) Sleep(1);
-   if(iTime(InpCustom,p.tf,0)!=start || iTime(InpCustom,p.tf,1)!=p.current) g_timeouts++;
+   if(iTime(InpCustom,p.tf,0)!=start || iTime(InpCustom,p.tf,1)!=p.current)
+      { g_timeouts++; PrintFormat("LiveReplay: timeout %s new bar %s not formed",EnumToString(p.tf),TimeToString(start)); }
    for(int s=0;s<ArraySize(p.handles);s++)
-      if(!Ready(p.handles[s],InpCustom,p.tf,10000)) g_timeouts++;
+      if(!Ready(p.handles[s],InpCustom,p.tf,10000))
+         { g_timeouts++; PrintFormat("LiveReplay: timeout %s %s not calculated at %s",EnumToString(p.tf),g_name[s],TimeToString(start)); }
    Ready(p.counter,InpCustom,p.tf,10000);
    int k=p.bars;
    ArrayResize(p.times,k+1,4096);
@@ -134,23 +136,25 @@ void Record(Feed &p,const datetime start)
 }
 
 // Lets the indicator thread work through a batch: waits until the counter has
-// seen the last tick (its forming-bar count moved). 2 s without that is counted
+// seen the last tick (its running total of calls moved). 2 s without that is counted
 // as a timeout, which fails the run.
 void Settle(Feed &p,const double before)
 {
    for(int waited=0;waited<2000 && !IsStopped();waited++)
    {
       double v[];
-      if(CopyBuffer(p.counter,0,0,1,v)==1 && v[0]!=before) return;
+      if(CopyBuffer(p.counter,1,0,1,v)==1 && v[0]!=before) return;
       Sleep(1);
    }
    g_timeouts++;
+   PrintFormat("LiveReplay: timeout %s counter stayed at %g after the batch ending %s",EnumToString(p.tf),before,
+      TimeToString((datetime)SymbolInfoInteger(InpCustom,SYMBOL_TIME),TIME_DATE|TIME_SECONDS));
 }
 
 double Count(Feed &p)
 {
    double v[];
-   return CopyBuffer(p.counter,0,0,1,v)==1?v[0]:-1;
+   return CopyBuffer(p.counter,1,0,1,v)==1?v[0]:-1;
 }
 
 bool AddTicks(MqlTick &ticks[])
