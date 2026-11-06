@@ -100,6 +100,7 @@ bool g_hidden;
 bool     g_rays;
 string   g_token;         // per instance: two VWAPs on one chart (same anchor,
 string   g_prefix;        // other source) must not share or delete objects
+const string TOKEN_SEQ = "DLV VWAP ray seq";   // terminal global behind g_token
 double   RayPrice[];      // untouched rays, sorted by price
 datetime RayFrom[];       // their start bar, which also names the object
 datetime g_lastRayFrom;   // the forming bar is recalculated: open each ray once
@@ -168,12 +169,11 @@ int OnInit()
 //+------------------------------------------------------------------+
 string NewToken()
   {
-   const string gv = "DLV VWAP ray seq";
-   GlobalVariableTemp(gv);   // fails harmlessly when it already exists
+   GlobalVariableTemp(TOKEN_SEQ);   // fails harmlessly when it already exists
    for(int attempt = 0; attempt < 100; attempt++)
      {
-      double v = GlobalVariableGet(gv);
-      if(GlobalVariableSetOnCondition(gv, v + 1, v))
+      double v = GlobalVariableGet(TOKEN_SEQ);
+      if(GlobalVariableSetOnCondition(TOKEN_SEQ, v + 1, v))
          return(IntegerToString((long)v + 1));
      }
    return(StringFormat("t%I64u", GetTickCount64()));
@@ -358,6 +358,10 @@ int OnCalculate(const int rates_total,
       g_lastRayFrom = 0;
       redraw = true;
      }
+   // Globals unread for 4 weeks are deleted; a recreated counter would hand
+   // out a live instance's token again. A read per new bar keeps it alive.
+   if(g_rays && rates_total != prev_calculated)
+      GlobalVariableGet(TOKEN_SEQ);
 
    for(int i = start; i < rates_total; i++)
      {
