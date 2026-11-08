@@ -22,15 +22,15 @@ LAB_ROOT = Path(__file__).resolve().parents[2] / "DLV_Quant_Lab"
 sys.path.insert(0, str(LAB_ROOT))
 import rules
 
-MA_PARAMS = [5, 12, 4]  # DLV_TD_MA inputs passed by DLV_TD_Export
+MA_PARAMS = [5, 12, 4]
+RISK_LINE_LENGTH = 12  # TD_DLV_v3.6 input RiskLineLength (default; DLV_TD_Export passes none)  # DLV_TD_MA inputs passed by DLV_TD_Export
 # Lab TD_MA1 reads bar 0's True Low/High from the raw Low/High (no prior close);
 # DLV_TD_MA waits for one. Only a qualification on bar `lookback` can differ, and
 # it extends `extend` bars. Excluded and reported, never silently dropped.
 MA_WARMUP = MA_PARAMS[1] + MA_PARAMS[2]
 POINT_COLUMNS = ("demand", "supply", "demand_confirmed", "supply_confirmed", "prior_demand", "prior_supply")
 UNMAPPED = {
-    "TD_SEQ": ["MQL5 buffers 5-12 (Setup/Countdown risk lines A/B): no Lab counterpart, not compared",
-               "Lab outputs 2/3 parked levels (-n): MQL5 publishes 0 (or 14 for a bar-13 deferral)",
+    "TD_SEQ": ["Lab outputs 2/3 parked levels (-n): MQL5 publishes 0 (or 14 for a bar-13 deferral)",
                "Lab outputs 4/5 parked levels (-n): MQL5 publishes 0"],
     "TD_MA1": [f"first {MA_WARMUP} bars: warm-up convention differs (bar-0 True Low/High), reported only"],
 }
@@ -65,6 +65,22 @@ def expected_seq(frame: pd.DataFrame) -> dict[str, tuple[str, np.ndarray]]:
         srun[t] = 1 if out[1][t] == 1 else (srun[t - 1] + 1 if srun[t - 1] and c[t] > c[t - 4] else 0)
     countdown = np.where(brun == 18, 15.0, np.where(srun == 18, -15.0, countdown))
     aggressive = np.where(out[4] > 0, out[4], np.where(out[5] > 0, -out[5], 0.0))
+    # Risk lines (buffers 5-12): each signal draws its level over its bar and the
+    # next RiskLineLength-1 (12 total) in buffer A or B by turns, clearing the
+    # other buffer there, so at most one of A/B is set per bar and it is the latest
+    # signal's. Compared as A-else-B against Lab 10-13 drawn the same way.
+    def drawn(levels: np.ndarray) -> np.ndarray:
+        line = np.full(len(levels), np.nan)
+        for t in np.flatnonzero(np.isfinite(levels)):
+            line[t:t + RISK_LINE_LENGTH] = levels[t]
+        return line
+    risk = {}
+    for column, k in (("buy_setup", 10), ("sell_setup", 11), ("buy_countdown", 12), ("sell_countdown", 13)):
+        a, b = frame[f"{column}_risk_a"].to_numpy(dtype=float), frame[f"{column}_risk_b"].to_numpy(dtype=float)
+        if (np.isfinite(a) & np.isfinite(b)).any():
+            raise ValueError(f"{column} risk: buffers A and B both set on one bar")
+        frame[f"{column}_stop"] = np.where(np.isfinite(a), a, b)
+        risk[f"{column}_stop"] = (f"buffers {column} risk A-else-B <- Lab {k} drawn {RISK_LINE_LENGTH} bars", drawn(out[k]))
     return {
         "tdst_resistance": ("buffer 0 <- Lab 7", out[7]),
         "tdst_support": ("buffer 1 <- Lab 6", out[6]),
@@ -73,6 +89,7 @@ def expected_seq(frame: pd.DataFrame) -> dict[str, tuple[str, np.ndarray]]:
         # v3.6 writes sell (-1) after buy (+1), so a same-bar pair reads -1.
         "perfection": ("buffer 4 <- Lab 8 / -Lab 9", np.where(out[9] == 1, -1.0, out[8])),
         "aggressive_countdown": ("buffer 13 <- Lab 4 / -Lab 5", aggressive),
+        **risk,
     }
 
 
@@ -85,7 +102,8 @@ SPECS: dict[str, Spec] = {}
 
 
 def spec_seq(frame: pd.DataFrame, name: str) -> tuple[dict[str, tuple], int]:
-    want = {k: (m, t, 1e-12) if k.startswith("tdst_") else (m, t) for k, (m, t) in expected_seq(frame).items()}
+    want = {k: (m, t, 1e-12) if k.startswith("tdst_") or k.endswith("_stop") else (m, t)
+            for k, (m, t) in expected_seq(frame).items()}
     return want, 0
 
 

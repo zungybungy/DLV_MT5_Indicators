@@ -138,9 +138,18 @@ def drift_seq(seq: Path) -> None:
         out[4] = out[4].where(out[4] <= 0, out[4] + 1)
         return tuple(out)
 
+    def risk_ppb(k: int):
+        def fn(df: pd.DataFrame, params: list) -> tuple:
+            out = list(seq_fn(df, params))
+            out[k] = out[k] * (1 + 1e-9)
+            return tuple(out)
+        return fn
+
     must_worsen(seq, "setup", "TD_SEQ", no_buy_nine)
     must_worsen(seq, "tdst_resistance", "TD_SEQ", tdst_ppb)
     must_worsen(seq, "aggressive_countdown", "TD_SEQ", countdown_plus_one)
+    must_worsen(seq, "buy_setup_stop", "TD_SEQ", risk_ppb(10))
+    must_worsen(seq, "sell_countdown_stop", "TD_SEQ", risk_ppb(13))
 
 
 def drift_ma(ma: Path) -> None:

@@ -80,7 +80,7 @@ EMPTY = NaN, compared exactly from bar 0.
 | TD 3 Countdown | 2 / 3 | +n on a counted bar, sell negated, buy first; parked = 0; a parked 12 on a qualifying close = 14 ("+", bar-13 deferral); bar 18 of a run = +-15 ("R") |
 | TD 4 Perfection | 8 / 9 | +1 buy, -1 sell (sell wins a same-bar pair) |
 | TD 13 Aggressive | 4 / 5 | +n counted, sell negated, parked = 0 |
-| TD 5-12 risk lines | none | not compared |
+| TD 5-12 risk lines (Setup/Countdown, buy/sell, A/B) | TD_SEQ 10-13 | per side, A-else-B (a new line clears the other buffer, so at most one is set) vs the Lab level drawn over its signal bar + 11; EMPTY = NaN, rtol 1e-12 |
 | MA 0 / 1 | TD_MA1 0 / 1 | rtol 1e-12; first 16 bars excluded (bar-0 True Low/High warm-up), reported |
 | Point 0-5, Levels 1 and 3 | TD_POINT 0-5 | exact; a Level-N point appears N bars after its pivot |
 | REI 0 (5) | TD_REI 0 | exact (pandas rolling-sum arithmetic replayed); EMPTY in warm-up and where sum(K) <= 1e-12 |
